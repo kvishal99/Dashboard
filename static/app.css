@@ -185,6 +185,16 @@ td.wrap-narrow { max-width: 13ch; white-space: normal; font-size: 0.76rem; line-
 /* The lakh/crore shorthand under each number. */
 td.num .muted { font-size: 0.7rem; }
 
+/* The job name. A zero-width space is inserted after each "/" when rendering,
+ * so it wraps at path boundaries instead of mid-word. */
+td.cron-name {
+  font-weight: 600;
+  font-size: 0.8rem;
+  max-width: 26ch;
+  white-space: normal;
+  line-height: 1.35;
+}
+
 /* Cron commands are long paths. Wrap them at any character rather than
  * clipping, so the whole thing is readable without a tooltip. */
 td.cron-cmd {

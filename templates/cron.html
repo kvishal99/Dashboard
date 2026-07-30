@@ -14,7 +14,9 @@
   </div>
   <div class="actions">
     <input type="search" id="filter" placeholder="Filter command, partner, server…" autocomplete="off">
-    <label class="toggle"><input type="checkbox" id="hide-disabled" checked> Hide disabled</label>
+    <label class="toggle" title="Entries commented out in the crontab. Untick to include them.">
+      <input type="checkbox" id="hide-disabled" checked> Hide disabled
+    </label>
   </div>
 </div>
 
@@ -30,9 +32,10 @@
       <thead>
         <tr>
           <th>Server</th>
+          <th>Job</th>
           <th>Schedule</th>
           <th>Partner</th>
-          <th>Script</th>
+          <th>Full command</th>
           <th>Last output</th>
           <th class="num">Size</th>
           <th>State</th>
@@ -79,7 +82,7 @@ function passesFilter(r) {
   const q = document.getElementById('filter').value.trim().toLowerCase();
   if (document.getElementById('hide-disabled').checked && r.disabled) return false;
   if (!q) return true;
-  return [r.command, r.partner, r.server, r.hostname, r.schedule_human]
+  return [r.name, r.command, r.partner, r.server, r.hostname, r.schedule_human]
     .some((v) => (v || '').toLowerCase().includes(q));
 }
 
@@ -109,14 +112,37 @@ function renderStats(s, servers) {
 
 function renderTable() {
   const visible = ROWS.filter(passesFilter);
-  document.getElementById('row-count').textContent =
-    `— showing ${visible.length} of ${ROWS.length}`;
+
+  // Say WHY rows are hidden and give a one-click way to see them, rather than
+  // leaving "309 of 427" as a mystery.
+  const reasons = [];
+  const hidingDisabled = document.getElementById('hide-disabled').checked;
+  const disabledCount = ROWS.filter((r) => r.disabled).length;
+  if (hidingDisabled && disabledCount) {
+    reasons.push(`<a href="#" id="show-disabled">${disabledCount} disabled hidden</a>`);
+  }
+  const q = document.getElementById('filter').value.trim();
+  if (q) reasons.push(`filtered by “${esc(q)}”`);
+
+  document.getElementById('row-count').innerHTML =
+    `— showing ${visible.length} of ${ROWS.length}`
+    + (reasons.length ? ` · ${reasons.join(' · ')}` : ' · all of them');
+
+  const link = document.getElementById('show-disabled');
+  if (link) {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      document.getElementById('hide-disabled').checked = false;
+      renderTable();
+    });
+  }
 
   if (!visible.length) {
     document.getElementById('tbody').innerHTML =
-      `<tr><td colspan="7" class="empty">
-        Nothing collected yet. Run
-        <span class="mono">./venv/bin/python collect-crons.py</span>
+      `<tr><td colspan="8" class="empty">
+        Nothing collected yet — the first collection runs shortly after startup
+        and takes a couple of minutes.<br>
+        To force it now: <span class="mono">./venv/bin/python collect-crons.py</span>
       </td></tr>`;
     return;
   }
@@ -136,15 +162,14 @@ function renderTable() {
 
     return `<tr>
       <td><span class="chip">${esc(r.server)}</span></td>
+      <td class="cron-name">${esc(r.name || '(unnamed)').replace(/\//g, '/​')}</td>
       <td style="font-size:0.82rem">${esc(r.schedule_human || r.schedule)}
         <div class="muted mono" style="font-size:0.68rem">${esc(r.schedule)}</div></td>
       <td>${r.partner
             ? `<a href="/partners/${encodeURIComponent(r.partner)}">${esc(r.partner)}</a>`
             : '<span class="muted">—</span>'}</td>
-      <td class="mono cron-cmd" title="${esc(r.command)}">${esc(shortPath(r.script) || esc(r.command))}
-        ${r.script && r.command.replace(r.script, '').trim().length > 3
-          ? `<div class="muted" style="font-size:0.66rem">${esc(r.command.replace(r.script, '…').slice(0, 90))}</div>`
-          : ''}</td>
+      <td class="mono cron-cmd" title="${esc(r.command)}">${esc(shortPath(r.script))}
+        <div class="muted" style="font-size:0.66rem">${esc(r.command)}</div></td>
       <td style="font-size:0.8rem">${out}</td>
       <td class="num">${fmtBytes(r.log_size)}</td>
       <td>${r.disabled
@@ -158,10 +183,10 @@ async function refresh() {
   const data = await getJSON('/api/cron');
   ROWS = data.jobs;
   renderStats(data.summary, data.servers);
-  const newest = data.servers.length
-    ? Math.max(...data.servers.map((s) => s.collected_at)) : null;
-  document.getElementById('collected').textContent = newest
-    ? `collected ${timeAgo(newest)} · run collect-crons.py to refresh`
+  // Collection is a scheduled background job, so show its state rather than
+  // telling the user to run a script.
+  document.getElementById('collected').innerHTML = data.job
+    ? jobLine(data.job)
     : 'run collect-crons.py to populate';
   renderTable();
 }

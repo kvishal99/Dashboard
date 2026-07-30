@@ -492,6 +492,7 @@ async def api_cron():
     return {
         "jobs": rows,
         "servers": servers,
+        "job": scheduler.status().get("crons"),
         "summary": {
             "total": len(rows),
             "servers": len(servers),

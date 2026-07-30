@@ -411,13 +411,19 @@ static/         CSS + JS
 
 ### Filling it from the Monday sheet
 
-The sheet already holds both halves of the partner-side number, so you can
-populate 78 of the 119 partners in one go without touching any PHP:
+`run-with-tunnel.sh` does this automatically at startup - no manual step. The
+sheet holds both halves of the partner-side number, which populates 78 of the
+119 partners without touching any PHP:
 
 ```bash
 ./venv/bin/python import-feed-counts.py --dry-run   # preview
-./venv/bin/python import-feed-counts.py             # import
+./venv/bin/python import-feed-counts.py             # re-import by hand
 ```
+
+The importer writes **straight to ops.db** rather than POSTing to the API. Going
+via HTTP meant it had to run after the dashboard was up, and racing startup
+silently failed all 85 rows more than once. Override the sheet location with
+`OPS_PARTNER_CSV`.
 
 ```
 partner side  =  "Partner Total Count"  +  "Not inserted count"
@@ -483,11 +489,24 @@ died. To distinguish them you need the script to report in — see
 
 ## Cron tab — every crontab entry on every reachable server
 
+**Collected automatically.** The dashboard re-reads every crontab as a
+background job on a 6-hour cycle (`app.cron_interval_seconds`), first run ~10s
+after startup. Nothing to run by hand.
+
+The interval is long on purpose: it opens an SSH session per host and stats
+every log file (~18s for 426 jobs across 3 servers), and crontabs rarely change.
+It's the last of the three jobs to start, so the faster tabs fill first.
+
+To force a refresh immediately:
+
 ```bash
 ./venv/bin/python collect-crons.py            # all hosts in .env
 ./venv/bin/python collect-crons.py 3.94.49.56 # one host
 ./venv/bin/python collect-crons.py --dry-run
 ```
+
+The logic lives in `cron_collect.py`; both the CLI and the scheduler call it, so
+there is one code path.
 
 Hosts come from `SSH_HOST` + `AGENT_HOSTS`, with per-host credentials. A host
 that can't be reached is reported and skipped, never blocking the others.
@@ -553,3 +572,26 @@ insert, nothing scheduled to refresh it.
 The NO CRON / NOT COLLECTED split matters: `livenation-europe` sits on
 `198.61.136.173`, which can't be reached, so it reports NOT COLLECTED rather
 than claiming a missing cron.
+
+### Job names
+
+Each cron row carries a short **Job** label so it's identifiable in a list of
+425 — derived from the last two path components, because the directory usually
+carries the meaning (`marriott_mvc/mvc.sh` beats a bare `mvc.sh`, and there are
+two different `yelp.sh` entries on one server).
+
+Deriving it needed more than "find a .php": the crontabs also contain
+extensionless executables (`.../events/partner_eventcron`), `cd X && …` wrappers
+and `if [ -f … ]` conditionals. `cron_parse.primary_target()` therefore prefers
+a path with a script extension, and otherwise takes the first absolute path that
+is not:
+
+- an interpreter or wrapper — matched as any `…/bin/{php,bash,python,flock,…}`,
+  so a virtualenv's `…/venv/bin/python` is skipped as well as `/usr/bin/python`
+- a lock or temp file (`/tmp/…`, `*.lock`)
+- the output redirect target
+- the working directory of a leading `cd`
+
+All 307 active jobs resolve to a name; none is mistaken for its interpreter.
+
+The **Full command** column shows the whole line, wrapped rather than truncated.

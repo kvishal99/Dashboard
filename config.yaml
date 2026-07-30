@@ -17,6 +17,10 @@ app:
   counts_interval_seconds: 1800
   # How often websites are health-checked, in seconds (default 2 min).
   health_interval_seconds: 120
+  # How often the servers' crontabs are re-read, in seconds (default 6 hours).
+  # This one opens an SSH session per host and stats every log file, so it is
+  # much heavier than the others - and crontabs rarely change.
+  cron_interval_seconds: 21600
   # A PM2 server is shown as OFFLINE if it hasn't reported in this long.
   pm2_stale_seconds: 30
   # SQLite file for dashboard history. Nothing is ever written to MySQL.

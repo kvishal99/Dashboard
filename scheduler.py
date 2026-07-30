@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 import counts
+import cron_collect
 from config import Config
 from health import check_site
 from store import Store
@@ -56,6 +57,7 @@ class Scheduler:
         self.jobs = {
             "counts": JobState("counts", config.counts_interval),
             "health": JobState("health", config.health_interval),
+            "crons": JobState("crons", config.cron_interval),
         }
         self._tasks: List[asyncio.Task] = []
         self._sem = asyncio.Semaphore(config.max_concurrent_queries)
@@ -66,6 +68,7 @@ class Scheduler:
         self._tasks = [
             asyncio.create_task(self._loop("counts", self.run_counts)),
             asyncio.create_task(self._loop("health", self.run_health)),
+            asyncio.create_task(self._loop("crons", self.run_crons)),
         ]
 
     async def stop(self) -> None:
@@ -80,10 +83,12 @@ class Scheduler:
 
     async def _loop(self, job_name: str, fn) -> None:
         job = self.jobs[job_name]
-        # Health first: it's fast, so the sites tab fills in while the slower
-        # count queries are still running.
+        # Health first (fast, so the sites tab fills immediately), then counts,
+        # then crons last - it holds SSH sessions open and is the least urgent.
         if job_name == "counts":
             await asyncio.sleep(3)
+        elif job_name == "crons":
+            await asyncio.sleep(10)
         while True:
             try:
                 await fn()
@@ -199,6 +204,41 @@ class Scheduler:
                 job.last_duration_ms = int((time.perf_counter() - started) * 1000)
                 job.runs += 1
         return {"checked": len(sites)}
+
+    # ----------------------------------------------------------------- crons
+
+    async def run_crons(self) -> Dict[str, Any]:
+        """SSH to each server and refresh its crontab listing.
+
+        On a long interval by default: it opens an SSH session per host and stats
+        every redirect target, so it is far heavier than the other jobs while the
+        answer changes rarely.
+        """
+        job = self.jobs["crons"]
+        async with job.lock:
+            job.running = True
+            job.progress = "connecting to servers"
+            started = time.perf_counter()
+            try:
+                result = await asyncio.to_thread(
+                    cron_collect.collect, self.config, self.store,
+                    None, False, lambda m: setattr(job, "progress", m),
+                )
+                unreachable = [h for h in result["hosts"] if not h["ok"]]
+                # Some hosts being unreachable is the normal state here (three
+                # partner boxes have no route at all), so it is only an error
+                # when nothing at all could be collected.
+                job.last_error = (
+                    "; ".join(f"{h['host']}: {h['error']}" for h in unreachable)
+                    if unreachable and not result["reachable"] else None
+                )
+                return result
+            finally:
+                job.running = False
+                job.progress = ""
+                job.last_run = time.time()
+                job.last_duration_ms = int((time.perf_counter() - started) * 1000)
+                job.runs += 1
 
     # ----------------------------------------------------------------- status
 

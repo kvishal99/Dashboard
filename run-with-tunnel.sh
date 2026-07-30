@@ -56,6 +56,8 @@ APP_PORT="${APP_PORT:-8000}"
 # Port opened ON THE SERVER that forwards back to this machine's dashboard, so
 # agent.py there can POST its PM2 stats to a laptop that has no public address.
 REMOTE_AGENT_PORT="${REMOTE_AGENT_PORT:-8777}"
+# The Monday status sheet, used to populate the "In partner feed" column.
+PARTNER_CSV="${OPS_PARTNER_CSV:-/home/vishal/Downloads/Monday Partner Status - Final.csv}"
 
 CONTROL="$(mktemp -u /tmp/ops-tunnel-XXXXXX.sock)"
 ASKPASS=""
@@ -275,7 +277,16 @@ if ! ./venv/bin/python check_db.py active; then
   exit 1
 fi
 
-echo
+# Fill the "In partner feed" column from the status sheet if nothing has
+# reported those numbers yet. Writes straight to ops.db, so it runs BEFORE the
+# dashboard starts - going via the HTTP API used to race startup and fail
+# silently. Skipped when live figures are already present.
+if [ -f "$PARTNER_CSV" ] || [ -f "${OPS_PARTNER_CSV:-}" ]; then
+  echo "Filling partner-feed counts from the status sheet..."
+  ./venv/bin/python import-feed-counts.py 2>&1 | tail -1
+  echo
+fi
+
 echo "Starting dashboard on http://127.0.0.1:$APP_PORT  (Ctrl-C to stop)"
 echo
 exec ./venv/bin/python -m uvicorn dashboard:app --host 127.0.0.1 --port "$APP_PORT"

@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
     schedule      TEXT,               -- raw 5-field spec, or @daily etc
     schedule_human TEXT,              -- best-effort plain English
     command       TEXT NOT NULL,
-    script        TEXT,               -- the .php/.sh being run
+    name          TEXT,               -- short human label, e.g. marriott_mvc/mvc.sh
+    script        TEXT,               -- the path being run
     partner       TEXT,               -- guessed from the path, may be null
     log_file      TEXT,               -- redirect target, if the line has one
     log_mtime     REAL,               -- when that file was last written
@@ -218,11 +219,12 @@ class Store:
             conn.executemany(
                 """INSERT INTO cron_jobs
                    (server, hostname, line_no, schedule, schedule_human, command,
-                    script, partner, log_file, log_mtime, log_size, disabled,
+                    name, script, partner, log_file, log_mtime, log_size, disabled,
                     collected_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(server, hostname, r.get("line_no"), r.get("schedule"),
-                  r.get("schedule_human"), r["command"], r.get("script"),
+                  r.get("schedule_human"), r["command"], r.get("name"),
+                  r.get("script"),
                   r.get("partner"), r.get("log_file"), r.get("log_mtime"),
                   r.get("log_size"), 1 if r.get("disabled") else 0, now)
                  for r in rows],

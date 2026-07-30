@@ -32,6 +32,7 @@ APP_DEFAULTS = {
     "agent_secret": "change-this-to-a-secure-token",
     "counts_interval_seconds": 1800,
     "health_interval_seconds": 120,
+    "cron_interval_seconds": 21600,
     "pm2_stale_seconds": 30,
     "db_path": "ops.db",
     "max_concurrent_queries": 4,
@@ -70,6 +71,7 @@ class Config:
         self.agent_secret: str = os.environ.get("OPS_AGENT_SECRET") or app["agent_secret"]
         self.counts_interval: int = int(app["counts_interval_seconds"])
         self.health_interval: int = int(app["health_interval_seconds"])
+        self.cron_interval: int = int(app["cron_interval_seconds"])
         self.pm2_stale_seconds: int = int(app["pm2_stale_seconds"])
         self.max_concurrent_queries: int = int(app["max_concurrent_queries"])
 

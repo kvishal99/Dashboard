@@ -24,8 +24,24 @@ SPECIALS = {
 # Env assignments at the top of a crontab (MAILTO=, PATH=, SHELL=).
 ENV_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=")
 
-# The script being run - last path component ending in a known extension.
-SCRIPT_RE = re.compile(r"(/[^\s;|>]+\.(?:php|sh|py|pl))", re.I)
+# The script being run - a path ending in a known extension.
+SCRIPT_RE = re.compile(r"(/[^\s;|>]+\.(?:php|sh|py|pl|rb|js))", re.I)
+
+# Any absolute path, for commands whose target has no extension at all
+# (e.g. /var/www/html/xmlgen/wcities/events/partner_eventcron).
+ANY_PATH_RE = re.compile(r"(/[A-Za-z0-9._@/-]{4,})")
+
+# Things that appear as an absolute path but are not the job: interpreters,
+# wrappers, and lock/temp files.
+# Matches ANY .../bin/<interpreter>, not just /usr/bin - a virtualenv's
+# .../venv/bin/python is just as much "not the job" as /usr/bin/python.
+NOT_THE_JOB = re.compile(
+    r"(?:^|/)bin/"
+    r"(?:php\d?|bash|sh|zsh|python\d?(?:\.\d+)?|perl|node|env|nice|"
+    r"flock|timeout|nohup|ionice|xargs|stat|date|find)$"
+    r"|^/tmp/|^/dev/|\.lock$",
+    re.I,
+)
 
 # Output redirect: "> file", ">> file". Ignores 2>&1 and /dev/null.
 REDIRECT_RE = re.compile(r"(?<!\d)>>?\s*([^\s;|&]+)")
@@ -108,6 +124,49 @@ def guess_partner(command: str, known: Optional[set] = None) -> Optional[str]:
     return None
 
 
+def primary_target(command: str, redirect: Optional[str] = None) -> Optional[str]:
+    """The path that identifies what this job actually runs.
+
+    Prefers a path with a script extension. Falls back to the first absolute
+    path that isn't an interpreter, wrapper, lock file or the output redirect -
+    which is how extensionless jobs like `.../partner_eventcron` get named.
+    """
+    match = SCRIPT_RE.search(command)
+    if match:
+        return match.group(1)
+
+    candidates = [
+        c.rstrip("/") for c in ANY_PATH_RE.findall(command)
+        if not NOT_THE_JOB.search(c) and not (redirect and c == redirect)
+    ]
+    # "cd /some/dir && real/job" - the first path is the working directory, not
+    # the thing being run, so skip it when another candidate follows.
+    if command.lstrip().startswith("cd ") and len(candidates) > 1:
+        candidates = candidates[1:]
+    return candidates[0] if candidates else None
+
+
+def job_name(target: Optional[str], command: str) -> str:
+    """A short label a human can recognise in a list of 400 jobs.
+
+    Uses the last two path components, because the directory usually carries
+    the meaning ("marriott_mvc/mvc.sh" beats a bare "mvc.sh", and there are
+    two different "yelp.sh" entries on one server).
+    """
+    if target:
+        parts = [p for p in target.split("/") if p]
+        if len(parts) >= 2:
+            return "/".join(parts[-2:])
+        if parts:
+            return parts[-1]
+    # No path at all - fall back to the first meaningful word of the command.
+    for token in command.split():
+        if token in ("cd", "if", "[", "&&", "||") or token.startswith("-"):
+            continue
+        return token[:40]
+    return "(unnamed)"
+
+
 def parse_crontab(text: str, known_partners: Optional[set] = None) -> List[Dict[str, Any]]:
     """Turn `crontab -l` output into structured rows."""
     rows: List[Dict[str, Any]] = []
@@ -139,7 +198,6 @@ def parse_crontab(text: str, known_partners: Optional[set] = None) -> List[Dict[
                 continue
             schedule, command = " ".join(parts[:5]), parts[5]
 
-        script_match = SCRIPT_RE.search(command)
         redirect = None
         for m in REDIRECT_RE.finditer(command):
             target = m.group(1)
@@ -147,12 +205,14 @@ def parse_crontab(text: str, known_partners: Optional[set] = None) -> List[Dict[
                 redirect = target
                 break
 
+        target = primary_target(command, redirect)
         rows.append({
             "line_no": i,
             "schedule": schedule,
             "schedule_human": humanise(schedule),
             "command": command,
-            "script": script_match.group(1) if script_match else None,
+            "script": target,
+            "name": job_name(target, command),
             "partner": guess_partner(command, known_partners),
             "log_file": redirect,
             "disabled": disabled,

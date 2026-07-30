@@ -18,17 +18,15 @@ them apart from live figures pushed by an ingest script, and any later
 `script` report for a partner simply supersedes this one.
 """
 import csv
-import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
-
 from config import BASE_DIR, load_config
+from store import Store
 
-DEFAULT_CSV = "/home/vishal/Downloads/Monday Partner Status - Final.csv"
-ENDPOINT = os.environ.get("OPS_DASHBOARD", "http://127.0.0.1:8000")
+DEFAULT_CSV = os.environ.get(
+    "OPS_PARTNER_CSV", "/home/vishal/Downloads/Monday Partner Status - Final.csv"
+)
 
 
 def as_int(raw: str):
@@ -53,7 +51,7 @@ def main() -> int:
         return 1
 
     config = load_config()
-    secret = config.agent_secret
+    store = Store(config.db_path)
 
     with open(path, encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
@@ -89,29 +87,21 @@ def main() -> int:
             sent += 1
             continue
 
-        payload = json.dumps({
-            "partner": name,
-            "feed_count": feed_count,
-            "inserted": total,
-            "source": "sheet",
-            "note": f"from {os.path.basename(path)}",
-        }).encode()
-        req = urllib.request.Request(
-            f"{ENDPOINT}/api/partners/feed-count",
-            data=payload,
-            headers={"Content-Type": "application/json", "x-agent-secret": secret},
-            method="POST",
-        )
+        # Written straight to the store rather than POSTed. Going through the
+        # HTTP API meant this had to run AFTER the dashboard was up, and racing
+        # its startup silently failed all 85 rows more than once.
         try:
-            with urllib.request.urlopen(req, timeout=10):
-                sent += 1
-        except urllib.error.HTTPError as exc:
-            failed += 1
-            hint = " - OPS_AGENT_SECRET mismatch?" if exc.code == 401 else ""
-            print(f"   FAILED {name}: HTTP {exc.code}{hint}")
+            store.record_feed_count(
+                partner=name,
+                feed_count=feed_count,
+                inserted=total,
+                source="sheet",
+                note=f"from {os.path.basename(path)}",
+            )
+            sent += 1
         except Exception as exc:
             failed += 1
-            print(f"   FAILED {name}: {exc}")
+            print(f"   FAILED {name}: {type(exc).__name__}: {exc}")
 
     print()
     verb = "would import" if dry_run else "imported"
