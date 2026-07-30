@@ -56,6 +56,25 @@ function fmtBytes(n) {
   return `${(n / 1048576).toFixed(1)} MB`;
 }
 
+/* These paths are mostly a long shared prefix. Collapsing it leaves room to
+ * show the part that identifies the job, and the cell wraps rather than
+ * clipping, so nothing is hidden behind an ellipsis. */
+const PREFIXES = [
+  ['/var/www/html/admin/administrator/components/com_events_venue/', '…/com_events_venue/'],
+  ['/home/fcampbell/eventPartner_174/', '…/eventPartner_174/'],
+  ['/home/fcampbell/eventPartner/', '…/eventPartner/'],
+  ['/var/www/html/', '…/'],
+  ['/home/fcampbell/', '~/'],
+];
+
+function shortPath(p) {
+  if (!p) return '—';
+  for (const [long, short] of PREFIXES) {
+    if (p.startsWith(long)) return short + p.slice(long.length);
+  }
+  return p;
+}
+
 function passesFilter(r) {
   const q = document.getElementById('filter').value.trim().toLowerCase();
   if (document.getElementById('hide-disabled').checked && r.disabled) return false;
@@ -122,8 +141,10 @@ function renderTable() {
       <td>${r.partner
             ? `<a href="/partners/${encodeURIComponent(r.partner)}">${esc(r.partner)}</a>`
             : '<span class="muted">—</span>'}</td>
-      <td class="mono" style="font-size:0.72rem;max-width:44ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-          title="${esc(r.command)}">${esc(r.script || r.command)}</td>
+      <td class="mono cron-cmd" title="${esc(r.command)}">${esc(shortPath(r.script) || esc(r.command))}
+        ${r.script && r.command.replace(r.script, '').trim().length > 3
+          ? `<div class="muted" style="font-size:0.66rem">${esc(r.command.replace(r.script, '…').slice(0, 90))}</div>`
+          : ''}</td>
       <td style="font-size:0.8rem">${out}</td>
       <td class="num">${fmtBytes(r.log_size)}</td>
       <td>${r.disabled

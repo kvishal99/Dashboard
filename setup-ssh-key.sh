@@ -15,7 +15,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-if [ -f .env ]; then
+# .env lives beside this script, or one level up when the code sits in a
+# subdirectory (e.g. a git repo checked out as ./Dashboard) and .env is kept
+# outside it. OPS_ENV_FILE overrides both.
+ENV_FILE="${OPS_ENV_FILE:-}"
+if [ -z "$ENV_FILE" ]; then
+  if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then ENV_FILE=".env"
+  elif [ -f ../.env ]; then ENV_FILE="../.env"
+  fi
+fi
+
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key value; do
     case "$key" in
       SSH_USER|SSH_HOST|SSH_PORT|SSH_PASSWORD)
@@ -25,7 +35,7 @@ if [ -f .env ]; then
         [ -z "${!key:-}" ] && export "$key=$value"
         ;;
     esac
-  done < <(grep -E '^[A-Z_]+=' .env || true)
+  done < <(grep -E "^[A-Z_]+=" "$ENV_FILE" || true)
 fi
 
 SSH_USER="${SSH_USER:-fcampbell}"

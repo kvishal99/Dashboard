@@ -184,6 +184,17 @@ td.name { max-width: 20ch; }
 td.wrap-narrow { max-width: 13ch; white-space: normal; font-size: 0.76rem; line-height: 1.35; }
 /* The lakh/crore shorthand under each number. */
 td.num .muted { font-size: 0.7rem; }
+
+/* Cron commands are long paths. Wrap them at any character rather than
+ * clipping, so the whole thing is readable without a tooltip. */
+td.cron-cmd {
+  font-size: 0.72rem;
+  max-width: 46ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  line-height: 1.4;
+}
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: rgba(125,211,252,0.06); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }

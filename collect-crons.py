@@ -34,7 +34,9 @@ SSH_BASE = [
 
 def env_from_dotenv() -> Dict[str, str]:
     """Read .env directly - values may contain characters a shell would mangle."""
-    path = os.path.join(BASE_DIR, ".env")
+    from config import ENV_PATH
+
+    path = ENV_PATH
     out: Dict[str, str] = {}
     if not os.path.isfile(path):
         return out

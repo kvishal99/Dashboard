@@ -6,7 +6,27 @@ import yaml
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.environ.get("OPS_CONFIG", os.path.join(BASE_DIR, "config.yaml"))
-ENV_PATH = os.path.join(BASE_DIR, ".env")
+
+
+def _find_env() -> str:
+    """Locate .env beside the code, or one level up.
+
+    The parent-directory fallback matters because the code can live in a
+    subdirectory (e.g. a git repo checked out as ./Dashboard) while .env stays
+    outside it, deliberately un-committed.
+    """
+    candidates = [
+        os.environ.get("OPS_ENV_FILE"),
+        os.path.join(BASE_DIR, ".env"),
+        os.path.join(os.path.dirname(BASE_DIR), ".env"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return os.path.join(BASE_DIR, ".env")
+
+
+ENV_PATH = _find_env()
 
 APP_DEFAULTS = {
     "agent_secret": "change-this-to-a-secure-token",

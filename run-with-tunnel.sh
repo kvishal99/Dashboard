@@ -20,10 +20,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# .env lives beside this script, or one level up when the code sits in a
+# subdirectory (e.g. a git repo checked out as ./Dashboard) and .env is kept
+# outside it. OPS_ENV_FILE overrides both.
+ENV_FILE="${OPS_ENV_FILE:-}"
+if [ -z "$ENV_FILE" ]; then
+  if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then ENV_FILE=".env"
+  elif [ -f ../.env ]; then ENV_FILE="../.env"
+  fi
+fi
+
 # ---------------------------------------------------------------- settings
 
 # Load .env without exporting anything unexpected: only the keys we use.
-if [ -f .env ]; then
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key value; do
     case "$key" in
       SSH_USER|SSH_HOST|SSH_PORT|SSH_PASSWORD|SSH_KEY|LOCAL_PORT|APP_PORT|REMOTE_AGENT_PORT|OPS_AGENT_SECRET)
@@ -35,7 +45,7 @@ if [ -f .env ]; then
         [ -z "${!key:-}" ] && export "$key=$value"
         ;;
     esac
-  done < <(grep -E '^[A-Z_]+=' .env || true)
+  done < <(grep -E "^[A-Z_]+=" "$ENV_FILE" || true)
 fi
 
 SSH_USER="${SSH_USER:-fcampbell}"
@@ -243,9 +253,9 @@ if [ -n "${AGENT_HOSTS:-}" ]; then
   for host in ${AGENT_HOSTS//,/ }; do
     [ "$host" = "$SSH_HOST" ] && continue
     suffix="$(echo "$host" | tr '.-' '__')"
-    h_user="$(grep -E "^SSH_USER_${suffix}=" .env 2>/dev/null | cut -d= -f2- || true)"
-    h_pass="$(grep -E "^SSH_PASSWORD_${suffix}=" .env 2>/dev/null | cut -d= -f2- || true)"
-    h_key="$(grep -E "^SSH_KEY_${suffix}=" .env 2>/dev/null | cut -d= -f2- || true)"
+    h_user="$(grep -E "^SSH_USER_${suffix}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+    h_pass="$(grep -E "^SSH_PASSWORD_${suffix}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+    h_key="$(grep -E "^SSH_KEY_${suffix}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
     h_user="${h_user:-$SSH_USER}"
     echo -n "Reverse tunnel to $host ... "
     open_reverse "$host" "$h_user" "$h_pass" "$h_key"

@@ -480,3 +480,76 @@ It shows whether inserts are *landing*, not whether the script *ran*. A cron
 that runs nightly and correctly finds nothing new looks identical to one that
 died. To distinguish them you need the script to report in — see
 `report_to_dashboard.php`, which records the feed total on every run.
+
+## Cron tab — every crontab entry on every reachable server
+
+```bash
+./venv/bin/python collect-crons.py            # all hosts in .env
+./venv/bin/python collect-crons.py 3.94.49.56 # one host
+./venv/bin/python collect-crons.py --dry-run
+```
+
+Hosts come from `SSH_HOST` + `AGENT_HOSTS`, with per-host credentials. A host
+that can't be reached is reported and skipped, never blocking the others.
+
+Current state — **425 jobs across 3 servers**:
+
+| Server | Jobs |
+|---|---|
+| `44.198.210.209` (ip-10-0-0-153) | 268 |
+| `3.94.49.56` (ip-10-0-0-242) | 145 |
+| `100.52.8.134` (ip-10-0-0-117) | 12 |
+
+307 active, 118 commented out, 66 matched to a known partner.
+
+### "Last output" — did it actually run?
+
+Where a cron line redirects (`> out.csv`, `>> run.log`), the collector stats
+that file, so you get the last time the job wrote anything. **207 of 425 jobs
+have one.** A `0 bytes` size shows as **empty** and a log untouched for over 30
+days is highlighted — both are signs a job is firing but producing nothing.
+
+This is inferred, not authoritative: the system cron log would be definitive but
+needs root. A job with no redirect shows *no log redirect* rather than a guess.
+
+### Storage
+
+A collection **replaces** that server's rows wholesale, so a job deleted from a
+crontab disappears here too rather than lingering as a phantom.
+
+Parsing (`cron_parse.py`) handles the real shapes in these crontabs: 5-field
+specs, `@daily`, multi-hour lists (`00 02,14 * * *` → "daily at 02:00 and
+14:00"), `*/15` steps, commented-out jobs (kept, marked DISABLED), and
+`MAILTO=`/`PATH=` env lines (skipped). Partner names are guessed from the path
+and matched against the known partner list, so a wrong guess isn't invented.
+
+## Note on layout
+
+The code can live in a subdirectory (e.g. `Dashboard/`) with `.env` kept in the
+parent, outside the git repo. `config.py` and the shell scripts look for `.env`
+beside themselves first, then one level up; `OPS_ENV_FILE` overrides both.
+
+### Jobs × Cron cross-reference
+
+The Jobs tab carries a **Cron entry** column populated from the collected
+crontabs, because the useful conclusion lives in the join:
+
+| Cron entry | Meaning |
+|---|---|
+| **SCHEDULED** | an active crontab line exists (its cadence is shown beneath) |
+| **COMMENTED OUT** | present in the crontab but disabled |
+| **NO CRON** | that server *was* collected and no entry was found |
+| **NOT COLLECTED** | we never read that server's crontab — absence proves nothing |
+
+"Stopped inserting" alone means the job is broken. "Stopped inserting **and**
+has no cron entry" means the job was *removed* — a different fix. The
+**Stalled + no cron** tile counts those, and they sort to the top of the table
+ordered by live-event count, so the biggest problem is the first row.
+
+Current: **9 of the 14 stalled partners have no cron entry**, led by
+`fareharbor` — 11,591 live events, weekly schedule, 114 days since its last
+insert, nothing scheduled to refresh it.
+
+The NO CRON / NOT COLLECTED split matters: `livenation-europe` sits on
+`198.61.136.173`, which can't be reached, so it reports NOT COLLECTED rather
+than claiming a missing cron.

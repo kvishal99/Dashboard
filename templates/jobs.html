@@ -37,7 +37,7 @@
           <th class="num">Overdue by</th>
           <th class="num">Live in DB</th>
           <th>Server</th>
-          <th>Cron path</th>
+          <th>Cron entry</th>
           <th>Job state</th>
         </tr>
       </thead>
@@ -61,6 +61,26 @@ function jobBadge(state) {
     case 'retired': return '<span class="badge unknown">RETIRED</span>';
     case 'dormant': return '<span class="badge unknown">DORMANT</span>';
     default:        return '<span class="badge unknown">NO SCHEDULE</span>';
+  }
+}
+
+/* Whether a crontab entry exists for this partner, from the Cron tab's data.
+ * "missing" is only claimed when that partner's server WAS collected - absence
+ * on a box we never looked at proves nothing, so that reads "not collected". */
+function cronCell(r) {
+  switch (r.cron_status) {
+    case 'found':
+      return `<span class="badge up">SCHEDULED</span>`
+           + (r.cron_schedule ? `<div class="muted" style="font-size:0.7rem">${esc(r.cron_schedule)}</div>` : '');
+    case 'disabled':
+      return '<span class="badge warn">COMMENTED OUT</span>'
+           + '<div class="muted" style="font-size:0.7rem">in crontab but disabled</div>';
+    case 'missing':
+      return '<span class="badge down">NO CRON</span>'
+           + '<div class="muted" style="font-size:0.7rem">server checked, none found</div>';
+    default:
+      return '<span class="badge unknown">NOT COLLECTED</span>'
+           + '<div class="muted" style="font-size:0.7rem">run collect-crons.py</div>';
   }
 }
 
@@ -97,6 +117,9 @@ function renderStats(s) {
     { label: 'Partners', value: s.total, sub: 'with counts collected' },
     { label: 'Stalled', value: s.stalled, sub: 'well past due — likely broken',
       cls: s.stalled ? 'is-bad' : '' },
+    { label: 'Stalled + no cron', value: s.stalled_no_cron,
+      sub: s.cron_collected ? 'job removed — start here' : 'run collect-crons.py',
+      cls: s.stalled_no_cron ? 'is-bad' : '' },
     { label: 'Late', value: s.late, sub: 'overdue, within grace',
       cls: s.late ? 'is-warn' : '' },
     { label: 'Running', value: s.ok, sub: 'inserted within schedule', cls: 'is-good' },
@@ -134,8 +157,7 @@ function renderTable() {
       <td class="num">${r.job_overdue_by ? `<span style="color:var(--bad)">+${Math.round(r.job_overdue_by)}d</span>` : '<span class="muted">—</span>'}</td>
       <td class="num">${fmtNum(r.db_future)}</td>
       <td><span class="chip">${esc(r.server || '—')}</span></td>
-      <td class="mono muted" style="font-size:0.7rem;max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-          title="${esc(r.path || '')}">${esc(r.path || '—')}</td>
+      <td>${cronCell(r)}</td>
       <td>${jobBadge(r.job_state)}</td>
     </tr>`).join('');
 }

@@ -18,10 +18,20 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# .env lives beside this script, or one level up when the code sits in a
+# subdirectory (e.g. a git repo checked out as ./Dashboard) and .env is kept
+# outside it. OPS_ENV_FILE overrides both.
+ENV_FILE="${OPS_ENV_FILE:-}"
+if [ -z "$ENV_FILE" ]; then
+  if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then ENV_FILE=".env"
+  elif [ -f ../.env ]; then ENV_FILE="../.env"
+  fi
+fi
+
 STOP=0
 if [ "${1:-}" = "--stop" ]; then STOP=1; shift; fi
 
-if [ -f .env ]; then
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key value; do
     case "$key" in
       SSH_USER|SSH_HOST|SSH_PORT|SSH_PASSWORD|SSH_KEY|REMOTE_AGENT_PORT|OPS_AGENT_SECRET)
@@ -31,7 +41,7 @@ if [ -f .env ]; then
         [ -z "${!key:-}" ] && export "$key=$value"
         ;;
     esac
-  done < <(grep -E '^[A-Z_]+=' .env || true)
+  done < <(grep -E "^[A-Z_]+=" "$ENV_FILE" || true)
 fi
 
 SSH_USER="${SSH_USER:-fcampbell}"
@@ -48,8 +58,8 @@ for var in SSH_PASSWORD SSH_USER SSH_KEY SSH_PORT; do
   specific="${var}_${HOST_SUFFIX}"
   # Re-read .env for the host-specific key, since the loop above only picks up
   # the generic names.
-  if [ -f .env ]; then
-    value="$(grep -E "^${specific}=" .env 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+    value="$(grep -E "^${specific}=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)"
     value="${value%$'\r'}"; value="${value%\"}"; value="${value#\"}"
     if [ -n "$value" ]; then
       export "$var=$value"

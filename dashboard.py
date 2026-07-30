@@ -407,11 +407,51 @@ _DB_IDENTITY: Dict[str, Any] = {}
 
 @app.get("/api/jobs/partners")
 async def api_partner_jobs():
-    """Ingest-job freshness per partner, worst first."""
+    """Ingest-job freshness per partner, worst first.
+
+    Cross-references the collected crontabs, because "stopped inserting" plus
+    "has no cron entry" together mean the job was removed - which neither fact
+    establishes on its own.
+    """
     rows = build_partner_rows()
+
+    cron_rows = store.cron_jobs()
+    collected_servers = {s["server"] for s in store.cron_servers()}
+    by_partner: Dict[str, List[Dict[str, Any]]] = {}
+    for cr in cron_rows:
+        if cr["partner"]:
+            by_partner.setdefault(cr["partner"].lower(), []).append(cr)
+
+    for r in rows:
+        entries = by_partner.get(r["name"].lower(), [])
+        active = [e for e in entries if not e["disabled"]]
+        if active:
+            r["cron_status"] = "found"
+        elif entries:
+            # Present but commented out - a deliberate disable, worth naming
+            # separately from a cron that isn't there at all.
+            r["cron_status"] = "disabled"
+        elif not collected_servers:
+            r["cron_status"] = "unknown"
+        elif r.get("server") and r["server"] not in collected_servers:
+            # We never looked at that box, so absence proves nothing.
+            r["cron_status"] = "unknown"
+        elif not r.get("server"):
+            r["cron_status"] = "unknown"
+        else:
+            r["cron_status"] = "missing"
+        r["cron_count"] = len(entries)
+        r["cron_schedule"] = (active or entries or [{}])[0].get("schedule_human")
+
     for r in rows:
         r["job_rank"] = jobs_mod.STATE_RANK.get(r.get("job_state"), 9)
-    rows.sort(key=lambda r: (r["job_rank"], -(r.get("job_days_since") or 0)))
+    # A stalled partner whose cron is also missing is the most actionable thing
+    # on the page, so it sorts above other stalled rows.
+    rows.sort(key=lambda r: (
+        r["job_rank"],
+        0 if r.get("cron_status") == "missing" else 1,
+        -(r.get("db_future") or 0),
+    ))
 
     counts = {}
     for r in rows:
@@ -427,6 +467,12 @@ async def api_partner_jobs():
             "never": counts.get("never", 0),
             "dormant": counts.get("dormant", 0),
             "retired": counts.get("retired", 0),
+            # The headline: stopped inserting AND nothing scheduled to fix it.
+            "stalled_no_cron": sum(
+                1 for r in rows
+                if r.get("job_state") == "stalled" and r.get("cron_status") == "missing"
+            ),
+            "cron_collected": len(collected_servers),
         },
         "jobs": scheduler.status(),
         "now": time.time(),
