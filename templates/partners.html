@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Partners · Ops Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Partner event counts</h1>
+    <p>
+      <strong>Total inserted</strong> is everything we hold for the partner, split
+      three ways: <strong>live</strong> (published, today forward),
+      <strong>already ended</strong> (inserted fine, just past), and
+      <strong>not published</strong> — inserted but never went live, which is
+      usually the number worth chasing.
+    </p>
+  </div>
+  <div class="actions">
+    <input type="search" id="filter" placeholder="Filter partners…" autocomplete="off">
+    <label class="toggle">
+      <input type="checkbox" id="only-problems"> Problems only
+    </label>
+    <button id="refresh-all" class="primary">Refresh counts</button>
+  </div>
+</div>
+
+<div class="stat-row" id="stats"></div>
+
+<div class="panel">
+  <h2>
+    <span>Partners <span class="hint" id="row-count"></span></span>
+    <span class="hint" id="job-line"></span>
+  </h2>
+  <div class="table-wrap">
+    <table id="partner-table">
+      <thead>
+        <tr>
+          <th class="sortable" data-sort-key="name" data-sort-default="asc">Partner</th>
+          <th class="num sortable" data-sort-key="partner_feed_count">In partner feed<br><span style="text-transform:none;font-weight:400">(their side)</span></th>
+          <th class="num sortable" data-sort-key="feed_total">Total inserted<br><span style="text-transform:none;font-weight:400">(our DB)</span></th>
+          <th class="num sortable" data-sort-key="db_future">Live in DB<br><span style="text-transform:none;font-weight:400">(today &amp; future)</span></th>
+          <th class="num sortable" data-sort-key="db_past">Ended</th>
+          <th class="num sortable" data-sort-key="db_unpublished">Not published</th>
+          <th class="sortable" data-sort-key="live_pct">% still live</th>
+          <th class="num sortable" data-sort-key="delta_future">Change</th>
+          <th class="sortable" data-sort-key="server">Server</th>
+          <th class="sortable" data-sort-key="frequency">Frequency</th>
+          <th class="sortable" data-sort-key="collected_at">Checked</th>
+          <th class="sortable" data-sort-key="status_rank" data-sort-default="asc">Status</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let ROWS = [];
+let JOBS = {};
+const sortState = { key: 'feed_total', dir: 'desc' };
+
+function passesFilter(row) {
+  const q = document.getElementById('filter').value.trim().toLowerCase();
+  if (q && !row.name.toLowerCase().includes(q)
+        && !(row.server || '').toLowerCase().includes(q)) return false;
+  if (document.getElementById('only-problems').checked) {
+    // A "problem" is: the query failed, nothing collected yet, we hold events
+    // but none are live, or fewer than half are live.
+    const bad = row.ok === false || row.ok === null
+      || (row.feed_total > 0 && row.db_future === 0)
+      || (row.live_pct !== null && row.live_pct < 50);
+    if (!bad) return false;
+  }
+  return true;
+}
+
+function renderStats(s) {
+  const tiles = [
+    { label: 'Partners tracked', value: fmtNum(s.partners),
+      sub: `${s.partners_with_data} with counts` },
+    { label: 'Total inserted', value: fmtNum(s.feed_total),
+      sub: fmtShort(s.feed_total) || 'across all partners' },
+    { label: 'Live in database', value: fmtNum(s.db_future),
+      sub: 'published, today &amp; future' },
+    { label: 'Already ended', value: fmtNum(s.db_past),
+      sub: 'inserted fine, just over' },
+    { label: 'Not published', value: fmtNum(s.db_unpublished),
+      sub: s.unpublished_pct !== null ? `${s.unpublished_pct.toFixed(1)}% of inserted` : 'never went live',
+      cls: s.unpublished_pct !== null && s.unpublished_pct >= 40 ? 'is-warn' : '' },
+    { label: '% still live', value: s.live_pct === null ? '—' : s.live_pct.toFixed(1) + '%',
+      sub: 'database ÷ feed' },
+    { label: 'Query errors', value: fmtNum(s.query_errors),
+      sub: s.never_collected ? `${s.never_collected} never checked` : 'all partners queried',
+      cls: s.query_errors > 0 ? 'is-bad' : 'is-good' },
+  ];
+  document.getElementById('stats').innerHTML = tiles.map((t) => `
+    <div class="stat ${t.cls || ''}">
+      <div class="label">${t.label}</div>
+      <div class="value">${t.value}</div>
+      <div class="sub">${t.sub}</div>
+    </div>`).join('');
+}
+
+function renderTable() {
+  const visible = sortRows(ROWS.filter(passesFilter), sortState.key, sortState.dir);
+  document.getElementById('row-count').textContent =
+    `— showing ${visible.length} of ${ROWS.length}`;
+
+  document.querySelectorAll('#partner-table th.sortable').forEach((th) => {
+    const base = th.dataset.label || (th.dataset.label = th.innerHTML);
+    th.innerHTML = `${base} ${sortArrow(sortState, th.dataset.sortKey)}`;
+  });
+
+  if (!visible.length) {
+    document.getElementById('tbody').innerHTML =
+      '<tr><td colspan="12" class="empty">No partners match.</td></tr>';
+    return;
+  }
+
+  document.getElementById('tbody').innerHTML = visible.map((r) => {
+    let status;
+    if (r.ok === null) status = '<span class="badge unknown">NOT CHECKED</span>';
+    else if (r.ok === false) status = '<span class="badge down">QUERY FAILED</span>';
+    else if (r.feed_total > 0 && r.db_future === 0) status = '<span class="badge down">NONE LIVE</span>';
+    else if (r.live_pct !== null && r.live_pct < 50) status = '<span class="badge warn">MOSTLY PAST</span>';
+    else status = '<span class="badge up">OK</span>';
+
+    let delta = '<span class="muted">—</span>';
+    if (r.delta_future !== null && r.delta_future !== 0) {
+      const up = r.delta_future > 0;
+      delta = `<span style="color:var(--${up ? 'good' : 'bad'})">${up ? '+' : ''}${fmtNum(r.delta_future)}</span>`;
+    } else if (r.delta_future === 0) {
+      delta = '<span class="muted">0</span>';
+    }
+
+    return `<tr>
+      <td class="name"><a href="/partners/${encodeURIComponent(r.name)}">${esc(r.name)}</a>
+        ${r.note ? `<div class="muted" style="font-size:0.72rem;font-weight:400;max-width:26ch">${esc(r.note)}</div>` : ''}</td>
+      <td class="num">${r.partner_feed_count === null
+          ? '<span class="muted" title="Not reported yet - this number is not in our database. See README: reporting the partner-side count.">—</span>'
+          : numCell(r.partner_feed_count) + (r.ingested_pct !== null
+              ? `<div class="muted" style="font-size:0.7rem">${r.ingested_pct.toFixed(0)}% ingested</div>` : '')}</td>
+      <td class="num">${numCell(r.feed_total)}</td>
+      <td class="num">${numCell(r.db_future)}</td>
+      <td class="num">${numCell(r.db_past)}</td>
+      <td class="num">${numCell(r.db_unpublished)}${
+        r.unpublished_pct !== null && r.unpublished_pct >= 50
+          ? `<div style="font-size:0.7rem;color:var(--warn)">${r.unpublished_pct.toFixed(0)}% of total</div>` : ''}</td>
+      <td>${meter(r.live_pct)}</td>
+      <td class="num">${delta}</td>
+      <td><span class="chip">${esc(r.server || '—')}</span></td>
+      <td class="muted wrap-narrow">${esc(r.frequency || '—')}</td>
+      <td class="muted" style="font-size:0.8rem" title="${fmtTime(r.collected_at)}">${timeAgo(r.collected_at)}</td>
+      <td>${status}${r.error ? `<div class="err" style="max-width:26ch">${esc(r.error)}</div>` : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+/* Severity order for sorting the Status column: worst first. Kept in step with
+ * the badge logic in renderTable(). */
+function statusRank(r) {
+  if (r.ok === false) return 0;                              // QUERY FAILED
+  if (r.ok === null) return 1;                               // NOT CHECKED
+  if (r.feed_total > 0 && r.db_future === 0) return 2;       // NONE LIVE
+  if (r.live_pct !== null && r.live_pct < 50) return 3;      // MOSTLY PAST
+  return 4;                                                  // OK
+}
+
+async function refresh() {
+  const data = await getJSON('/api/partners');
+  ROWS = data.partners.map((r) => ({ ...r, status_rank: statusRank(r) }));
+  JOBS = data.jobs;
+  renderStats(data.summary);
+  document.getElementById('job-line').innerHTML = jobLine(JOBS.counts);
+  renderTable();
+}
+
+document.getElementById('filter').addEventListener('input', renderTable);
+document.getElementById('only-problems').addEventListener('change', renderTable);
+makeSortable('partner-table', sortState, renderTable);
+wireRefresh('refresh-all', '/api/counts/refresh', refresh);
+startPolling(refresh, 15000);
+</script>
+{% endblock %}

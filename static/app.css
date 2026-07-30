@@ -1,0 +1,328 @@
+/* Ops Dashboard - dark UI.
+ *
+ * Colour notes (checked, not eyeballed):
+ *  - Status colours are reserved for state and always ship with a glyph AND a
+ *    text label, never colour alone. That matters because #4ade80 / #fca5a5
+ *    sit close together for deuteranopic readers - the label carries meaning,
+ *    the colour only reinforces it.
+ *  - The percentage meter is magnitude, so it is a SINGLE hue. It is not a
+ *    red/amber/green rainbow; the number beside it does the precise work.
+ *  - Every foreground/background pair below was measured at >= 4.5:1 (AA),
+ *    most at AAA.
+ */
+
+:root {
+  --bg: #0b1120;
+  --panel: #131c31;
+  --panel-2: #0f172a;
+  --border: #26324b;
+
+  /* Ink */
+  --text: #e8edf7;
+  --muted: #8ea0be;
+  --accent: #7dd3fc;
+
+  /* Status - reserved. Always paired with a glyph + label. */
+  --good: #4ade80;
+  --good-bg: #0f3d24;
+  --bad: #fca5a5;
+  --bad-bg: #4c1414;
+  --warn: #fcd34d;
+  --warn-bg: #4a2f07;
+  --none: #9fb0cc;
+  --none-bg: #1e293b;
+
+  /* Magnitude - one hue, used for the meter fill only. */
+  --meter: #38bdf8;
+  --meter-track: #1e293b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  font-size: 14px;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------- layout */
+
+header.topbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand { font-weight: 700; font-size: 1.05rem; padding: 16px 0; white-space: nowrap; }
+.brand span { color: var(--accent); }
+
+nav.tabs { display: flex; gap: 4px; flex: 1; }
+nav.tabs a {
+  padding: 17px 16px;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  font-weight: 500;
+}
+nav.tabs a:hover { color: var(--text); text-decoration: none; }
+nav.tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.topbar-right { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 0.8rem; }
+
+main { padding: 24px; max-width: 1600px; margin: 0 auto; }
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+.page-head h1 { margin: 0 0 4px; font-size: 1.4rem; }
+.page-head p { margin: 0; color: var(--muted); font-size: 0.85rem; max-width: 70ch; }
+
+/* ------------------------------------------------------------ stat tiles */
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.stat .label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.stat .value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-top: 6px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.stat .sub { color: var(--muted); font-size: 0.75rem; margin-top: 4px; }
+/* Status tint on a tile is decoration - the label always says what it is. */
+.stat.is-good .value { color: var(--good); }
+.stat.is-bad .value { color: var(--bad); }
+.stat.is-warn .value { color: var(--warn); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 22px;
+}
+.panel > h2 {
+  margin: 0;
+  padding: 14px 16px;
+  font-size: 0.95rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.panel > h2 .hint { font-weight: 400; color: var(--muted); font-size: 0.78rem; }
+
+/* ---------------------------------------------------------------- tables */
+
+/* Horizontal scroll lives here, and the inset shadow on the right edge is the
+ * cue that there is more table off-screen - without it a clipped column just
+ * looks broken. */
+.table-wrap {
+  overflow-x: auto;
+  background:
+    linear-gradient(to right, var(--panel) 30%, rgba(19,28,49,0)) left center,
+    linear-gradient(to left,  var(--panel) 30%, rgba(19,28,49,0)) right center;
+  background-repeat: no-repeat;
+  background-size: 28px 100%, 28px 100%;
+  background-attachment: local, local;
+}
+
+table { width: 100%; border-collapse: collapse; }
+
+th {
+  text-align: left;
+  padding: 10px 9px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  background: var(--panel);
+  /* Deliberately NOT position:sticky. .table-wrap sets overflow-x:auto, which
+   * makes it a scroll container, so a sticky <th> would offset itself inside
+   * that container - leaving a gap above the header and hiding the first row
+   * behind it. Horizontal scrolling for the wide table matters more. */
+}
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text); }
+th .arrow { opacity: 0.45; font-size: 0.7rem; }
+
+td { padding: 10px 9px; border-bottom: 1px solid rgba(38,50,75,0.55); vertical-align: middle; }
+/* Keep the wide free-text columns from stretching the table until Status - the
+ * last column - is pushed off-screen. */
+td.name { max-width: 20ch; }
+td.wrap-narrow { max-width: 13ch; white-space: normal; font-size: 0.76rem; line-height: 1.35; }
+/* The lakh/crore shorthand under each number. */
+td.num .muted { font-size: 0.7rem; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: rgba(125,211,252,0.06); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.name { font-weight: 600; }
+.empty { padding: 28px 16px; color: var(--muted); text-align: center; }
+
+/* ---------------------------------------------------------------- badges */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+/* ::before is the glyph - the second channel alongside the text label. */
+.badge.up      { background: var(--good-bg); color: var(--good); }
+.badge.up::before      { content: "\25CF"; }        /* filled circle */
+.badge.down    { background: var(--bad-bg);  color: var(--bad); }
+.badge.down::before    { content: "\25B2"; }        /* triangle */
+.badge.warn    { background: var(--warn-bg); color: var(--warn); }
+.badge.warn::before    { content: "\25C6"; }        /* diamond */
+.badge.unknown { background: var(--none-bg); color: var(--none); }
+.badge.unknown::before { content: "\2013"; }        /* en dash */
+
+.muted { color: var(--muted); }
+.err { color: var(--bad); font-size: 0.78rem; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+.chip {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--none-bg);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ------------------------------------------------------------- the meter */
+
+.meter { display: flex; align-items: center; gap: 8px; min-width: 104px; }
+.meter .track {
+  flex: 1;
+  height: 6px;
+  background: var(--meter-track);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 42px;
+}
+.meter .fill { height: 100%; border-radius: 3px; background: var(--meter); }
+.meter .pct {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  min-width: 48px;
+  text-align: right;
+  color: var(--text);
+}
+
+/* --------------------------------------------------------------- buttons */
+
+button, .btn {
+  background: var(--none-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+button:hover, .btn:hover { background: #263449; text-decoration: none; }
+button:disabled { opacity: 0.55; cursor: default; }
+button.primary { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+button.primary:hover { background: #2563eb; }
+
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+input[type="search"], input[type="text"] {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  min-width: 210px;
+}
+input::placeholder { color: var(--muted); }
+
+label.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------- sparkline */
+
+.spark { display: flex; gap: 2px; align-items: flex-end; height: 22px; }
+.spark i { width: 4px; border-radius: 1px; background: var(--meter); display: block; min-height: 2px; }
+.spark i.is-bad { background: var(--bad); }
+
+/* ---------------------------------------------------------------- banner */
+
+.banner {
+  padding: 11px 24px;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+  line-height: 1.5;
+}
+.banner.warn { background: var(--warn-bg); color: var(--warn); }
+.banner.warn strong { color: #fde68a; }
+.banner .mono { color: inherit; }
+
+/* ----------------------------------------------------------------- toast */
+
+.toast {
+  position: fixed;
+  bottom: 22px;
+  right: 22px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  padding: 12px 18px;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s, transform 0.2s;
+  pointer-events: none;
+  z-index: 50;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.is-bad { border-left-color: var(--bad); }

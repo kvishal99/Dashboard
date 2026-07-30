@@ -1,0 +1,817 @@
+####################################################################
+# Ops Dashboard configuration
+#
+# The partner list is NOT here - it is discovered from the database on
+# every run (see `partner_discovery` below). The `partner_meta` block
+# at the bottom only supplies cosmetic extras (server, frequency,
+# path, note) read from "Monday Partner Status - Final.csv".
+#
+# partner_meta was last regenerated from the CSV dated 2026-07-29.
+####################################################################
+
+app:
+  # Shared secret that agent.py sends in the x-agent-secret header.
+  agent_secret: "change-this-to-a-secure-token"
+  # How often partner counts are refreshed, in seconds (default 30 min).
+  # These are COUNT() queries over a large table - don't set this too low.
+  counts_interval_seconds: 1800
+  # How often websites are health-checked, in seconds (default 2 min).
+  health_interval_seconds: 120
+  # A PM2 server is shown as OFFLINE if it hasn't reported in this long.
+  pm2_stale_seconds: 30
+  # SQLite file for dashboard history. Nothing is ever written to MySQL.
+  db_path: "ops.db"
+  # How many single-partner queries may run against MySQL at the same time.
+  # Only used by the per-partner "Refresh" button; the scheduled run is one query.
+  max_concurrent_queries: 4
+
+
+####################################################################
+# MySQL connection.
+#
+# READ-ONLY. mysql.py rejects any statement that is not a bare SELECT,
+# so this dashboard cannot INSERT / UPDATE / DELETE / DROP / ALTER.
+#
+# No password here - put it in `.env` (see .env.example). Every field
+# can be overridden from the environment:
+#   OPS_DB_HOST  OPS_DB_PORT  OPS_DB_USER  OPS_DB_PASSWORD  OPS_DB_NAME
+####################################################################
+database:
+  # These defaults point at THIS laptop's MySQL, which holds a copy that
+  # DISAGREES with production (active: 3,941/898 here vs 3,155/1,764 real).
+  # Do not trust them.
+  #
+  # ./run-with-tunnel.sh overrides host/port to reach the real server over
+  # SSH, which is the supported way to run this. The dashboard names its
+  # source in the top bar so you always know which one answered.
+  host: "127.0.0.1"
+  port: 3306
+  user: "webuser"
+  database: "admin"
+  connect_timeout: 10
+  # The grouped scan takes ~8s on the AI server, ~37s on the laptop copy.
+  read_timeout: 180
+
+
+####################################################################
+# The two counts, exactly as you specified them.
+#
+#   feed_total -> every event we hold for that partner. This is the
+#                 number that matches "Partner Total Count" in the CSV.
+#   db_future  -> published events that have not ended yet, i.e. today
+#                 forward. Past events are excluded as you asked.
+#
+# %s is bound as a query parameter to the partner name - it is never
+# formatted into the SQL string.
+####################################################################
+queries:
+  # THE scheduled query. One grouped scan returns every partner at once
+  # (~75s over 2.9M rows). Running the three per-partner counts separately
+  # instead took ~8 minutes of repeated scans for the same answer.
+  all_partners: "SELECT partner, COUNT(id) AS total, SUM(published = '1' AND enddates >= CURRENT_DATE) AS live, SUM(published = '1' AND enddates < CURRENT_DATE) AS ended, MAX(created) AS last_created FROM jos_eventlist_events WHERE partner IS NOT NULL AND partner <> '' GROUP BY partner"
+
+  # The single-partner forms below are used only by the per-partner
+  # "Refresh this partner" button.
+
+  # Everything we hold for the partner (matches "Partner Total Count" in the CSV).
+  feed_total: "SELECT COUNT(id) FROM jos_eventlist_events WHERE partner = %s"
+  # Published and not yet ended - today forward. The events that still matter.
+  db_future: "SELECT COUNT(id) FROM jos_eventlist_events WHERE published = '1' AND enddates >= CURRENT_DATE AND partner = %s"
+  # Published but already over. Dead weight, but they did insert correctly.
+  db_past: "SELECT COUNT(id) FROM jos_eventlist_events WHERE published = '1' AND enddates < CURRENT_DATE AND partner = %s"
+  # Unpublished is derived as feed_total - db_future - db_past, so it costs no
+  # extra query. It's the interesting one: rows that inserted but never went live.
+
+
+####################################################################
+# Websites / servers health-checked on a schedule.
+#
+# expect_status : the code(s) that count as healthy. May be a single
+#                 number or a list. A list is the honest way to
+#                 describe a host that always answers 401/403 - the
+#                 server is up, and a change AWAY from that code is
+#                 what you actually want to be told about.
+# keyword       : optional string that must appear in the body
+#
+# The values below were set from a real run on 2026-07-28 - see the
+# comment on each line for what was actually observed.
+####################################################################
+websites:
+  - name: "eventseeker.com"
+    url: "https://www.eventseeker.com"
+    # Answered 403 from this machine even with a browser User-Agent, so a
+    # WAF/CDN is blocking this host. Run the dashboard from an allowed
+    # server and tighten this back to plain 200.
+    expect_status: [200, 403]
+    timeout: 15
+  - name: "wcities.com"
+    url: "https://www.wcities.com"
+    expect_status: 200          # observed 200
+    timeout: 15
+  - name: "content.wcities.com"
+    url: "http://content.wcities.com"
+    expect_status: [200, 401]   # observed 401 - HTTP auth in front of it
+    timeout: 15
+  # Partner servers, per the CSV dated 2026-07-29. 198.61.136.172 and .174
+  # no longer appear in the sheet at all - their partners moved onto the two
+  # boxes below (44.198.210.209 went 22 -> 68 partners, 3.94.49.56 19 -> 51),
+  # so they are not monitored here any more.
+  - name: "Partner server 44.198.210.209 (68 partners)"
+    url: "http://44.198.210.209"
+    expect_status: 200          # observed 200
+    timeout: 10
+  - name: "Partner server 3.94.49.56 (51 partners)"
+    url: "http://3.94.49.56"
+    expect_status: 200          # observed 200
+    timeout: 10
+
+  # Still listed for 8 partners, but port 22 times out from this machine and
+  # port 80 was never verified. Uncomment once you know what it should answer.
+  # - name: "Partner server 198.61.136.173 (8 partners)"
+  #   url: "http://198.61.136.173"
+  #   timeout: 10
+
+
+
+
+####################################################################
+# Partner discovery.
+#
+# The partner list is NOT hardcoded - it comes from the database:
+#   SELECT partner, ... FROM jos_eventlist_events GROUP BY partner
+#
+# That means a new partner shows up on the dashboard by itself, and
+# nothing gets silently dropped. (The CSV's `type` column was doing
+# exactly that: `active` has a blank type, so a type="feed" rule hid
+# a live weekly partner with ~900 live events.)
+#
+# min_live_events: a partner needs at least this many published,
+#   not-yet-ended events to appear. 1 keeps every partner that still
+#   has something live and hides the long-dead ones (~117 of 149).
+#   Set to 0 to show every partner in the table, live or not.
+####################################################################
+partner_discovery:
+  min_live_events: 1
+  exclude:
+    - "bw"
+    - "brownpaper"
+    - "digitick"
+    - "draisgroup"
+    - "etix"
+    - "college-sports"
+
+
+####################################################################
+# Optional per-partner metadata, taken from the Monday status sheet.
+# Purely cosmetic - it fills in the Server / Frequency columns and the
+# note shown under the partner name. A partner missing from here still
+# appears, just without those extras.
+####################################################################
+partner_meta:
+  "active":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/activeEvents/insertEvents-active.php"
+  "adticket":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/adticket/insertEvents-adticket.php"
+  "ahotu":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ahotu"
+  "AI-festival":
+    frequency: "Manual (provide by Mayur) one time insert"
+  "Ai_artist_events":
+    frequency: "Manual (provide by Devendra)"
+  "allevents":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner_174/allevents"
+    type: "feed"
+  "artshound":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/artshound/insertEventsArtshound.php"
+    note: "need to check"
+  "ATG":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner/ATG"
+    note: "check process"
+  "axs":
+    server: "44.198.210.209"
+    frequency: "Mannual (provide by partner every week monday)"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/axs/insertEvent-axs.php"
+    type: "feed"
+  "biletix":
+    server: "44.198.210.209"
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/biletix/index.php"
+    type: "scraping"
+  "bokun":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/bokun"
+  "booketing":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/booketing/insertEvent.php"
+    type: "feed"
+  "brownpaper":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/brownpaper/insertEvents-brownpaper.php"
+    note: "No new feed"
+    type: "feed"
+  "bw":
+    frequency: "New Partner Need to add in details file"
+    note: "no upload on dropbox"
+  "calendar-artsboston":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/calendar_artsboston/insertCalendarArtsBoston.php"
+    type: "scraping"
+  "classictic":
+    server: "198.61.136.173"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/classictic/insertEvents-classictic.php"
+    note: "not working"
+  "cobber":
+    server: "44.198.210.209"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/cobber"
+  "college-sports":
+    server: "3.94.49.56"
+    frequency: "Manual"
+    path: "/home/fcampbell/eventPartner/college_sports/insert_event_college_sports.php"
+    note: "no upload on dropbox"
+    type: "scraping"
+  "dice.fm":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/dice.fm/insert_events.php"
+    type: "feed"
+  "digitick":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/digitick/insertEvents-digitick.php"
+    note: "Remove from the partner list - Amir sir 2 oct 2025"
+    type: "feed"
+  "draisgroup":
+    server: "3.94.49.56"
+    frequency: "Monthly(Manual)"
+    path: "/home/fcampbell/eventPartner_174/draisgroup"
+    note: "No new feed"
+  "electrostub":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/electrostub/insertEvents-electrostub.php"
+    note: "need to check"
+  "entradas":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/entradas/insert_events.php"
+    note: "No New Events found in feed"
+    type: "feed"
+  "etix":
+    server: "3.94.49.56"
+    frequency: "Mannual (Provide by ramesh/sudhan)"
+    path: "/home/fcampbell/eventPartner/Etix/insert_etix_events.php"
+    note: "Feed not available"
+    type: "scraping"
+  "eventbrite":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/eventbrite/ Eventbrite catlog -  1. /var/www/html/admin/administrator/components/com_events_venue/eventbrite/eventbrite_org/ai_venue_matching_evenbrite_new.php 2. /var/www/html/admin/administrator/components/com_events_venue/eventbrite/eventbrite_org/eventbrite_online_feed_US_v2_onetime.php"
+    note: "no upload on dropbox"
+  "eventim":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/eventim/insertEvents-eventim.php"
+  "eventim-ch":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/eventim-ch/eventIn.php"
+  "eventim-hr":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/eventim-hr/insertEvents_eventim-hr.php"
+  "eventim-si":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/eventim-si/insertEvent.php"
+  "eventim-uk":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/eventim-uk/insertEvents-eventim-uk.php"
+  "eventseeker-ugc":
+    frequency: "New Partner Need to add in details file"
+  "eventsgrabber":
+    frequency: "New Partner Need to add in details file"
+  "evvnt":
+    server: "198.61.136.173"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner/evvnt/insert_event_evvnt.php"
+  "facebook":
+    server: "3.94.49.56"
+    frequency: "Alternate weekly"
+    path: "/home/fcampbell/eventPartner_174/facebook/scrape_facebook_events.php"
+  "fareharbor":
+    server: "44.198.210.209"
+    frequency: "weekly(Manual)"
+    note: "no upload on dropbox"
+  "fever":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner/fever/insert_events.php"
+    type: "feed"
+  "fnac":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/fnac/InsertEvent.php"
+    type: "feed"
+  "gametime":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/gametime"
+    type: "feed"
+  "getmein":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/getmein/new_getmein.php"
+  "gigantic":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/gigantic/insertEvents-gigantic.php"
+    type: "feed"
+  "gigpig":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/gicpig"
+    note: "running"
+    type: "feed"
+  "gofan":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/gofan"
+    type: "feed"
+  "goldstar":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/goldstar/insertEvents-goldstar.php"
+  "grooveticket":
+    server: "198.61.136.173"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/grooveticket/insertEvents-grooveticket.php"
+    note: "need to check"
+  "guidle":
+    server: "3.94.49.56"
+    frequency: "wed-sat"
+    path: "/home/fcampbell/eventPartner_174/guidle/"
+    type: "feed"
+  "heckticket":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/heckticket/insertEvents_heckticket.php"
+  "hellotickets":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner_174/hellotickets"
+    note: "Partner removed as per mail - Fwd: Stop this partner ASAP and delete all their events. 30-03-2026"
+    type: "feed"
+  "holdmyticket":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/holdmyticket/insertEvents-holdmyticket.php"
+    type: "feed"
+  "jumpcomedy":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/jumpcomedy"
+    type: "feed"
+  "kassir":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/kassir/InsertVenue_Events.php"
+    note: "451 Unavailable For Legal Reasons"
+    type: "feed"
+  "konzertkasse-de":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/konzertkasse-de/insert_events.php"
+    note: "Stoppped"
+  "laughstub":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/laughstub/insertEvents-laughstub.php"
+    note: "need to check"
+  "linticket":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/linticket/insert_event.php"
+    type: "feed"
+  "livenation-europe":
+    server: "198.61.136.173"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/livenation-europe/insertEvents-livenation_europe.php"
+    note: "need to check"
+  "Milwaukee":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/milwaukee365/insertMilwaukee365.php"
+  "musement":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/home/fcampbell/faizan/Museum/Event_details/Insert/InsertEvents_Musement.php"
+    note: "need to check"
+  "music-opera":
+    server: "198.61.136.173"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner/music-opera/insert_events.php"
+    type: "feed"
+  "musicfestivalwizard":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner_174/musicfestivalwizard"
+    type: "scraping"
+  "myticket.de":
+    server: "44.198.210.209"
+    frequency: "Manualy every tuesday"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/myticket.de/insert_events.php"
+    type: "feed"
+  "NBL":
+    server: "198.61.136.173"
+    frequency: "Monthly(Manual as per requirment)"
+    path: "/home/fcampbell/eventPartner/NBL"
+    note: "Tournament is finished"
+  "nortic.se":
+    server: "3.94.49.56"
+    frequency: "Alternate weekly"
+    path: "/home/fcampbell/eventPartner_174/nortic.se"
+    type: "feed"
+  "nowplayingnashville":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/nowplayingnashville/insertevents_nowplayingnashville.php"
+  "oeticket":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/oeticket/insertEvents_oeticket.php"
+  "olympics":
+    frequency: "manual-onetime"
+  "oztix":
+    server: "44.198.210.209"
+    frequency: "Manual"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/oztix/insertEvent-oztix.php"
+    note: "need to check"
+  "p1travel":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/p1travel/"
+  "platinumlist":
+    server: "34.197.195.248"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner/platinumlist"
+  "prekindle":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/prekindle/insertEvents-prekindle.php"
+    note: "Url feed internal server error"
+    type: "feed"
+  "residentadvisor":
+    server: "44.198.210.209"
+    frequency: "Manual"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/residentadvisor/insertEvents_resident.php"
+    note: "need to check"
+    type: "scraping"
+  "resortpass":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    note: "No New Events in the feed"
+  "sacramento365":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/sacramento365/insertSacramento365.php"
+    type: "scraping"
+  "schema":
+    frequency: "New Partner Need to add in details file"
+    note: "no upload on dropbox"
+  "schema-artist":
+    frequency: "New Partner Need to add in details file"
+  "schema-bw":
+    frequency: "New Partner Need to add in details file"
+  "scorebig":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner_174/scorebig/insert_events.php"
+    note: "URL not working inform to Ozair Sir"
+    type: "Feed issue verification coe"
+  "seatgeek":
+    server: "3.94.49.56"
+    frequency: "Alternate weekly"
+    path: "/home/fcampbell/eventPartner/seatgeek"
+    type: "feed"
+  "seeticket":
+    server: "44.198.210.209"
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/seeticket/insert_Events_seeticket.php"
+    type: "feed"
+  "seeticket-es":
+    server: "44.198.210.209"
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/seeticket-ES/insert_events.php"
+    note: "need to check"
+  "seeticket-fr":
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/seeticket-FR/insert_events.php"
+    note: "Feed not available"
+    type: "feed"
+  "seeticket-pt":
+    server: "44.198.210.209"
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/seeticket-PT/insert_events.php"
+    type: "feed"
+  "seeticket_US":
+    server: "44.198.210.209"
+    frequency: "Monthly(Manual)"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/seeticket_US/"
+    type: "feed"
+  "showclix":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/showclix/insert_event.php"
+  "showpass":
+    server: "44.198.210.209"
+    frequency: "New Partner Need to add in details file"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/showpass/insertEvent.php"
+    type: "feed"
+  "sidearms":
+    server: "3.94.49.56"
+    frequency: "weekly (manualy)"
+    path: "/home/fcampbell/eventPartner/sidearms/insert_events.php"
+    note: "Sidearm data is scraped during the college-sports scraping process."
+    type: "feed"
+  "simpletix":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/simpletix/InsertEvent.php"
+    type: "feed"
+  "skiddle":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/skiddle/insertEvents-skiddle.php"
+    note: "running"
+    type: "feed"
+  "speakeasy":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/speakeasy"
+  "SportsEvents365":
+    server: "44.198.210.209"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/sportsEvent/insertEvents-sportsEvent.php"
+    type: "feed"
+  "stager":
+    server: "44.198.210.209"
+    frequency: "Daily"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/stager"
+    type: "feed"
+  "starticket":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/starticket/insertEvents-starticket.php"
+    note: "need to check not inserted"
+    type: "feed"
+  "strangertickets":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/stranger/insertEvents-Stranger.php"
+    type: "scraping"
+  "stubhub":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner_174/stubhub/insertEvents_stubhub.php"
+    type: "feed"
+  "stubwire":
+    server: "198.61.136.173"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/stubwire/insert_event_IE.php"
+  "thesportsdb":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/thesportsdb"
+    note: "No New Events in the feed"
+  "tickeri":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/tickeri/insert_events.php"
+    type: "feed"
+  "ticket_liquidator":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/ticket_liquidator/Insert_event.php"
+    type: "feed"
+  "ticketarena":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketarena/insertEvents_Ticketarena.php"
+    note: "need to check"
+  "ticketbis":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketbis/ticketbis.php"
+    note: "need to check"
+  "ticketbox-nl":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketbox_nl/insertEvents-ticketbox_nl.php"
+  "ticketcity":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/ticketcity/InsertArtist_Venue_Events.php"
+    note: "Partner removed from cron as per mail of ozair sir on 13/11/2025"
+    type: "feed"
+  "ticketcorner":
+    server: "44.198.210.209"
+    frequency: "Monthly(Manual) provide by Sudhan"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketcorner"
+    note: "Monthly(Manual) provide by Sudhan"
+  "ticketek":
+    server: "44.198.210.209"
+    frequency: "Manualy"
+    path: "/home/fcampbell/nikhil/ticketek_events_onetime/Insert_Event_Venue.php"
+    type: "scraping"
+  "ticketevolution":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner_174/ticketevolution/insert_events_ticketevolution.php"
+    type: "feed"
+  "ticketfly":
+    server: "198.61.136.173"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/ticketfly/insertEvents-ticketfly.php"
+  "ticketkite":
+    server: "3.94.49.56"
+    frequency: "New Partner Need to add in details file"
+    path: "/home/fcampbell/eventPartner_174/ticketkite"
+    note: "Feed not download"
+  "ticketleap":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketleap/insertEvent_ticketleap.php"
+    note: "Feed not available"
+    type: "feed"
+  "ticketline":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/ticketline/insertEvents-ticketline.php"
+    type: "feed"
+  "ticketmaster-es":
+    server: "44.198.210.209"
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/Ticketmaster/Spain/ticketmaster-es.php"
+  "ticketmasterV2":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner_174/ticketmasterV2/ticketmasterV2.php"
+    type: "feed"
+  "ticketnetwork":
+    server: "44.198.210.209"
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketNetwork/ticketnewtwork.php"
+  "ticketon":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketon/insertEvents_Ticketon.php"
+  "ticketone-it":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner/ticketone-it/insertEvents-ticketone-it.php"
+    type: "feed"
+  "Ticketonline":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/Ticketonline/insertEvents-Ticketonline.php"
+  "ticketor":
+    server: "44.198.210.209"
+    frequency: "weekly(Manual)"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketor/InsertVenue_Events.php"
+    note: "Feed not available"
+  "ticketpoint_nl":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketpoint_nl/ticketpoint-InsertEvent.php"
+    note: "need to check"
+  "ticketsdotcom":
+    server: "44.198.210.209"
+    frequency: "Alternate weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketsdotcom/insertEvents-ticketsdotcom.php"
+  "ticketsource":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/TicketsourceUK/insertEvents_TicketsourceUk.php"
+    note: "need to check"
+  "ticketswap":
+    server: "44.198.210.209"
+    frequency: "Daily"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticketswap"
+  "tickpick":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/tickpick/insert_events.php"
+    type: "feed"
+  "tickster":
+    frequency: "Weekly (cron set)"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/tickster/insertEvent.php"
+    type: "feed"
+  "ticombo":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/ticombo"
+  "tiqet":
+    server: "3.94.49.56"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/tiqets/Insert_event.php"
+    type: "feed"
+  "tixel":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/tixel/insertEvent.php"
+    type: "feed"
+  "tixr":
+    server: "3.94.49.56"
+    frequency: "Manual"
+    path: "/home/fcampbell/eventPartner_174/tixr/InsertEvent.php"
+    note: "Scrapping not Allowed"
+  "todaytix":
+    frequency: "Mannual (Provide by ramesh/sudhan)"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/todaytix/insertEvent.php"
+    note: "Mannual (Provide by ramesh/sudhan)"
+    type: "feed"
+  "tomaticket":
+    server: "3.94.49.56"
+    frequency: "Weekly"
+    path: "/home/fcampbell/eventPartner/tomaticket"
+  "topticketshop-nl":
+    server: "44.198.210.209"
+    frequency: "weekly"
+    path: "/home/fcampbell/eventPartner_174/topticket"
+    type: "feed"
+  "Trustedtours":
+    server: "44.198.210.209"
+    frequency: "yearly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/trustedtours/newpartner.php"
+    note: "url not working 27 feb 2025 - https://trustedtours.net/xml/wcities.xml"
+  "tunestub":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/tunestub/insertEvents-tunestub.php"
+    note: "need to check"
+  "universe":
+    server: "44.198.210.209"
+    frequency: "manual-onetime"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/universe/insertEvents_universe.php"
+    note: "API is not working (get 404 error)"
+    type: "feed"
+  "Vegas":
+    server: "3.94.49.56"
+    frequency: "Monthly(manual)"
+    path: "/home/fcampbell/eventPartner_174/vegas/"
+    type: "feed"
+  "venuepilot":
+    server: "44.198.210.209"
+    frequency: "Daily (need to se in cron)"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/venuepilot"
+    note: "checking not inserted file"
+    type: "feed"
+  "viagogo":
+    server: "3.94.49.56"
+    frequency: "weekly (manual)"
+    path: "/home/fcampbell/eventPartner/viagogo"
+    type: "feed"
+  "viator":
+    server: "44.198.210.209"
+    frequency: "Manualy"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/viator/"
+    note: "no upload on dropbox"
+  "vivaticket.it":
+    server: "44.198.210.209"
+    frequency: "manual-onetime"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/vivaticket/vivaticket.php"
+    note: "manual-onetime"
+    type: "scraping"
+  "Vivid":
+    server: "44.198.210.209"
+    frequency: "New Partner Need to add in details file"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/vivid_seat"
+  "wcities":
+    frequency: "New Partner Need to add in details file"
+  "weezevent":
+    server: "44.198.210.209"
+    frequency: "Weekly"
+    path: "/var/www/html/admin/administrator/components/com_events_venue/weezevent/insertEvents-weezevent.php"
+    type: "feed"
+  "wegottickets":
+    server: "3.94.49.56"
+    frequency: "Daily"
+    path: "/home/fcampbell/eventPartner/wegottickets/insertEvents-wegottickets.php"
+    type: "feed"

@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}{{ partner.name }} · Ops Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ partner.name }}</h1>
+    <p>
+      <a href="/">← All partners</a>
+      {% if partner.frequency %}&nbsp;·&nbsp; runs {{ partner.frequency }}{% endif %}
+      {% if partner.server %}&nbsp;·&nbsp; server {{ partner.server }}{% endif %}
+    </p>
+    {% if partner.path %}<p class="mono muted" style="margin-top:6px">{{ partner.path }}</p>{% endif %}
+    {% if partner.note %}<p style="margin-top:6px;color:var(--warn)">{{ partner.note }}</p>{% endif %}
+  </div>
+  <div class="actions">
+    <button id="refresh-one" class="primary">Refresh this partner</button>
+  </div>
+</div>
+
+<div class="stat-row" id="stats"></div>
+
+<div class="panel">
+  <h2>
+    <span>Count history</span>
+    <span class="hint">most recent first · one row per collection</span>
+  </h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Collected</th>
+          <th class="num">Total inserted</th>
+          <th class="num">Live in database</th>
+          <th class="num">Already ended</th>
+          <th class="num">Not published</th>
+          <th>% still live</th>
+          <th class="num">Query time</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="history"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PARTNER = {{ partner.name | tojson }};
+
+function renderStats(p) {
+  const tiles = [
+    { label: 'Total inserted', value: fmtNum(p.feed_total), sub: fmtShort(p.feed_total) || 'total held' },
+    { label: 'Live in database', value: fmtNum(p.db_future), sub: 'published, today &amp; future' },
+    { label: 'Already ended', value: fmtNum(p.db_past), sub: 'inserted fine, just over' },
+    { label: 'Not published', value: fmtNum(p.db_unpublished),
+      sub: p.unpublished_pct !== null ? `${p.unpublished_pct.toFixed(1)}% of inserted` : 'never went live',
+      cls: p.unpublished_pct !== null && p.unpublished_pct >= 40 ? 'is-warn' : '' },
+    { label: '% still live', value: p.live_pct === null ? '—' : p.live_pct.toFixed(1) + '%', sub: 'live ÷ total inserted' },
+    { label: 'Last checked', value: timeAgo(p.collected_at),
+      sub: p.duration_ms ? `query took ${(p.duration_ms / 1000).toFixed(1)}s` : '—',
+      cls: p.ok === false ? 'is-bad' : '' },
+  ];
+  document.getElementById('stats').innerHTML = tiles.map((t) => `
+    <div class="stat ${t.cls || ''}">
+      <div class="label">${t.label}</div>
+      <div class="value">${t.value}</div>
+      <div class="sub">${t.sub}</div>
+    </div>`).join('');
+}
+
+function renderHistory(rows) {
+  if (!rows.length) {
+    document.getElementById('history').innerHTML =
+      '<tr><td colspan="8" class="empty">No collections recorded yet.</td></tr>';
+    return;
+  }
+  document.getElementById('history').innerHTML = rows.map((h) => {
+    const unpub = (h.feed_total !== null && h.db_future !== null && h.db_past !== null)
+      ? Math.max(h.feed_total - h.db_future - h.db_past, 0) : null;
+    const pct = (h.feed_total && h.db_future !== null)
+      ? (100 * h.db_future / h.feed_total) : null;
+    return `<tr>
+      <td class="muted" style="font-size:0.82rem">${fmtTime(h.collected_at)}</td>
+      <td class="num">${fmtNum(h.feed_total)}</td>
+      <td class="num">${fmtNum(h.db_future)}</td>
+      <td class="num">${fmtNum(h.db_past)}</td>
+      <td class="num">${fmtNum(unpub)}</td>
+      <td>${meter(pct)}</td>
+      <td class="num muted">${h.duration_ms ? (h.duration_ms / 1000).toFixed(1) + 's' : '—'}</td>
+      <td>${h.ok ? '<span class="badge up">OK</span>' : '<span class="badge down">FAILED</span>'}
+        ${h.error ? `<div class="err" style="max-width:40ch">${esc(h.error)}</div>` : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  const [summary, hist] = await Promise.all([
+    getJSON(`/api/partners/${encodeURIComponent(PARTNER)}`),
+    getJSON(`/api/partners/${encodeURIComponent(PARTNER)}/history?limit=60`),
+  ]);
+  renderStats(summary.partner);
+  renderHistory(hist.history);
+}
+
+wireRefresh('refresh-one', `/api/partners/${encodeURIComponent(PARTNER)}/refresh`, refresh);
+startPolling(refresh, 20000);
+</script>
+{% endblock %}

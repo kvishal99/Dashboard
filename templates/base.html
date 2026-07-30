@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Ops Dashboard{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Ops<span>Dashboard</span></div>
+    <nav class="tabs">
+      <a href="/"          class="{{ 'active' if active == 'partners' }}">Partners</a>
+      <a href="/jobs"      class="{{ 'active' if active == 'jobs' }}">Jobs</a>
+      <a href="/cron"      class="{{ 'active' if active == 'cron' }}">Cron</a>
+      <a href="/sites"     class="{{ 'active' if active == 'sites' }}">Website Health</a>
+      <a href="/processes" class="{{ 'active' if active == 'processes' }}">Processes</a>
+    </nav>
+    <div class="topbar-right">
+      <span id="db-identity" class="chip" title="Which MySQL server these numbers come from"></span>
+      <span id="last-poll">loading…</span>
+    </div>
+  </header>
+
+  <div id="db-banner"></div>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    // Name the source of the numbers, always. The laptop copy and the master
+    // both answer on 127.0.0.1:3306 with an `admin` schema but hold different
+    // data, so "which server is this?" must never be a guess.
+    const LAPTOP_HOSTNAME = 'vishal-konale';
+    getJSON('/api/db/identity').then((db) => {
+      const chip = document.getElementById('db-identity');
+      if (!db.ok) {
+        chip.textContent = 'db unreachable';
+        chip.style.color = 'var(--bad)';
+        return;
+      }
+      chip.textContent = `db: ${db.hostname}`;
+      if (db.hostname === LAPTOP_HOSTNAME) {
+        chip.style.color = 'var(--warn)';
+        document.getElementById('db-banner').innerHTML =
+          `<div class="banner warn">
+             <strong>Local copy — not the master.</strong>
+             These counts come from <span class="mono">${esc(db.hostname)}</span>, which
+             disagrees with the production database (<span class="mono">active</span>:
+             3,941/898 here vs 3,155/1,764 on the master). Run
+             <span class="mono">./run-with-tunnel.sh</span> for real numbers.
+           </div>`;
+      }
+    }).catch(() => {});
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

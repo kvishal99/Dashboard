@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Processes · Ops Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>PM2 processes</h1>
+    <p>
+      Live from <span class="mono">agent.py</span> running on each server. A server
+      shows as offline when no heartbeat has arrived within the stale window —
+      that usually means the agent stopped, not that the box is down.
+    </p>
+  </div>
+</div>
+
+<div class="stat-row" id="stats"></div>
+
+<div class="panel">
+  <h2>
+    <span>Processes by server</span>
+    <span class="hint" id="stale-hint"></span>
+  </h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Server</th>
+          <th>Process</th>
+          <th>Status</th>
+          <th class="num">CPU</th>
+          <th class="num">Memory</th>
+          <th class="num">Restarts</th>
+          <th>Uptime</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function uptimeFrom(ms) {
+  if (!ms) return '—';
+  const secs = Math.max(0, Date.now() / 1000 - ms / 1000);
+  if (secs < 3600) return `${Math.round(secs / 60)}m`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h`;
+  return `${Math.round(secs / 86400)}d`;
+}
+
+function procBadge(status) {
+  if (status === 'online') return '<span class="badge up">ONLINE</span>';
+  if (status === 'errored') return `<span class="badge down">${esc(status).toUpperCase()}</span>`;
+  return `<span class="badge warn">${esc(status || 'unknown').toUpperCase()}</span>`;
+}
+
+function renderStats(servers) {
+  const procs = servers.flatMap((s) => s.processes);
+  const tiles = [
+    { label: 'Servers reporting', value: servers.length, sub: 'agents sending heartbeats' },
+    { label: 'Servers offline', value: servers.filter((s) => s.stale).length,
+      sub: 'no recent heartbeat',
+      cls: servers.some((s) => s.stale) ? 'is-bad' : '' },
+    { label: 'Processes', value: procs.length, sub: 'across all servers' },
+    { label: 'Online', value: procs.filter((p) => p.status === 'online').length,
+      sub: 'running normally', cls: 'is-good' },
+    { label: 'Errored', value: procs.filter((p) => p.status === 'errored').length,
+      sub: 'need attention',
+      cls: procs.some((p) => p.status === 'errored') ? 'is-bad' : '' },
+  ];
+  document.getElementById('stats').innerHTML = tiles.map((t) => `
+    <div class="stat ${t.cls || ''}">
+      <div class="label">${t.label}</div>
+      <div class="value">${t.value}</div>
+      <div class="sub">${t.sub}</div>
+    </div>`).join('');
+}
+
+async function refresh() {
+  const data = await getJSON('/api/pm2/status');
+  renderStats(data.servers);
+  document.getElementById('stale-hint').textContent =
+    `offline after ${data.stale_after_seconds}s without a heartbeat`;
+
+  if (!data.servers.length) {
+    document.getElementById('tbody').innerHTML =
+      `<tr><td colspan="7" class="empty">
+        No agents reporting yet. Run <span class="mono">agent.py</span> on a server
+        with SERVER_ID set and point it at this dashboard.
+      </td></tr>`;
+    return;
+  }
+
+  const rows = [];
+  data.servers.forEach((srv) => {
+    const header = `${esc(srv.server_id)} ${srv.stale
+      ? '<span class="badge down">OFFLINE</span>'
+      : '<span class="badge up">LIVE</span>'}`;
+
+    if (!srv.processes.length) {
+      rows.push(`<tr><td class="name">${header}</td>
+        <td colspan="6" class="muted">No processes reported</td></tr>`);
+      return;
+    }
+    srv.processes.forEach((p, i) => {
+      rows.push(`<tr>
+        <td class="name">${i === 0 ? header : ''}
+          ${i === 0 ? `<div class="muted" style="font-weight:400;font-size:0.72rem">seen ${timeAgo(srv.last_updated)}</div>` : ''}</td>
+        <td>${esc(p.name)} <span class="chip">id ${p.id}</span></td>
+        <td>${procBadge(p.status)}</td>
+        <td class="num">${p.cpu ?? 0}%</td>
+        <td class="num">${p.memory ?? 0} MB</td>
+        <td class="num">${p.restarts ?? 0}</td>
+        <td class="muted">${uptimeFrom(p.uptime)}</td>
+      </tr>`);
+    });
+  });
+  document.getElementById('tbody').innerHTML = rows.join('');
+}
+
+startPolling(refresh, 5000);
+</script>
+{% endblock %}

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Website Health · Ops Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Website health</h1>
+    <p>
+      Every site below is polled on a schedule. A site is healthy when the request
+      completes, the status code matches what's expected, and (if configured) a
+      keyword is present in the body. Anything else — timeout, DNS failure, TLS
+      error, wrong status — shows as down with the reason.
+    </p>
+  </div>
+  <div class="actions">
+    <button id="refresh-sites" class="primary">Check all now</button>
+  </div>
+</div>
+
+<div class="stat-row" id="stats"></div>
+
+<div class="panel">
+  <h2>
+    <span>Sites</span>
+    <span class="hint" id="job-line"></span>
+  </h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th>Status</th>
+          <th class="num">HTTP</th>
+          <th class="num">Response</th>
+          <th>Uptime (24h)</th>
+          <th class="num">Avg latency (24h)</th>
+          <th>Last checked</th>
+          <th>Last 30 checks</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function sparkFor(url) {
+  try {
+    const { history } = await getJSON(`/api/sites/history?url=${encodeURIComponent(url)}&limit=30`);
+    if (!history.length) return '<span class="muted">—</span>';
+    const max = Math.max(...history.map((h) => h.latency_ms || 0), 1);
+    // Oldest on the left, newest on the right.
+    return '<div class="spark">' + history.slice().reverse().map((h) => {
+      const height = Math.max(2, Math.round(22 * (h.latency_ms || 0) / max));
+      const title = h.ok ? `${h.latency_ms}ms` : (h.error || 'down');
+      return `<i class="${h.ok ? '' : 'is-bad'}" style="height:${height}px" title="${esc(title)}"></i>`;
+    }).join('') + '</div>';
+  } catch {
+    return '<span class="muted">—</span>';
+  }
+}
+
+function renderStats(sites) {
+  const down = sites.filter((s) => s.ok === false).length;
+  const up = sites.filter((s) => s.ok === true).length;
+  const unknown = sites.filter((s) => s.ok === null).length;
+  const lat = sites.map((s) => s.avg_latency_24h).filter((v) => v !== null);
+  const tiles = [
+    { label: 'Sites monitored', value: sites.length, sub: 'from config.yaml' },
+    { label: 'Up', value: up, sub: 'responding as expected', cls: 'is-good' },
+    { label: 'Down', value: down, sub: down ? 'needs attention' : 'nothing down',
+      cls: down ? 'is-bad' : '' },
+    { label: 'Not yet checked', value: unknown, sub: unknown ? 'first check pending' : 'all checked' },
+    { label: 'Avg latency', value: lat.length ? Math.round(lat.reduce((a, b) => a + b, 0) / lat.length) + ' ms' : '—',
+      sub: 'mean across sites, 24h' },
+  ];
+  document.getElementById('stats').innerHTML = tiles.map((t) => `
+    <div class="stat ${t.cls || ''}">
+      <div class="label">${t.label}</div>
+      <div class="value">${t.value}</div>
+      <div class="sub">${t.sub}</div>
+    </div>`).join('');
+}
+
+async function refresh() {
+  const data = await getJSON('/api/sites');
+  renderStats(data.sites);
+  document.getElementById('job-line').innerHTML = jobLine(data.jobs.health);
+
+  if (!data.sites.length) {
+    document.getElementById('tbody').innerHTML =
+      '<tr><td colspan="8" class="empty">No websites configured.</td></tr>';
+    return;
+  }
+
+  const sparks = await Promise.all(data.sites.map((s) => sparkFor(s.url)));
+  document.getElementById('tbody').innerHTML = data.sites.map((s, i) => `
+    <tr>
+      <td class="name">${esc(s.name)}<div class="muted mono" style="font-weight:400">${esc(s.url)}</div></td>
+      <td>${statusBadge(s.ok, { unknown: 'NOT CHECKED' })}
+        ${s.error ? `<div class="err" style="max-width:34ch">${esc(s.error)}</div>` : ''}</td>
+      <td class="num">${s.status_code ?? '—'}<div class="muted" style="font-size:0.7rem">want ${s.expect_status}</div></td>
+      <td class="num">${s.latency_ms !== null ? s.latency_ms + ' ms' : '—'}</td>
+      <td>${meter(s.uptime_24h)}<div class="muted" style="font-size:0.7rem">${s.checks_24h} checks</div></td>
+      <td class="num">${s.avg_latency_24h !== null ? s.avg_latency_24h + ' ms' : '—'}</td>
+      <td class="muted" style="font-size:0.8rem" title="${fmtTime(s.checked_at)}">${timeAgo(s.checked_at)}</td>
+      <td>${sparks[i]}</td>
+    </tr>`).join('');
+}
+
+wireRefresh('refresh-sites', '/api/sites/refresh', refresh);
+startPolling(refresh, 10000);
+</script>
+{% endblock %}
