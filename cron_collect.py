@@ -14,6 +14,7 @@ access to the system cron log.
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -67,8 +68,15 @@ def creds(env: Dict[str, str], host: str) -> Tuple[str, Optional[str], Optional[
 
 def ssh_run(host: str, user: str, password: Optional[str], key: Optional[str],
             remote_cmd: str, timeout: int = 60) -> Tuple[bool, str]:
-    """Run a command over SSH. Password goes via SSH_ASKPASS, never argv."""
-    args = ["ssh", *SSH_BASE]
+    """Run a command over SSH. Password goes via SSH_ASKPASS, never argv.
+
+    Password auth is wrapped in `setsid` so ssh has no controlling terminal.
+    Without that, ssh prompts on the tty and this hangs until the timeout:
+    SSH_ASKPASS_REQUIRE=force only exists in OpenSSH >= 8.4, and Rocky 8 ships
+    8.0, where it is ignored. No tty means askpass is the only way in, on every
+    version.
+    """
+    args = ["ssh", *SSH_BASE, "-n"]
     env = dict(os.environ)
     askpass_path = None
 
@@ -88,6 +96,10 @@ def ssh_run(host: str, user: str, password: Optional[str], key: Optional[str],
         args += ["-o", "PreferredAuthentications=password",
                  "-o", "PubkeyAuthentication=no",
                  "-o", "NumberOfPasswordPrompts=1"]
+        # -w so we still get ssh's own exit status and its stdout back.
+        setsid = shutil.which("setsid")
+        if setsid:
+            args = [setsid, "-w"] + args
     else:
         return False, "no password or key configured"
 
