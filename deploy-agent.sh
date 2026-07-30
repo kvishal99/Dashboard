@@ -6,11 +6,18 @@
 #     ./deploy-agent.sh 3.94.49.56           # a specific server
 #     ./deploy-agent.sh --stop 3.94.49.56    # remove the agent from that server
 #
-# The agent posts PM2 stats back to this dashboard. Because this machine has no
-# public address, it posts to REMOTE_AGENT_PORT on the server's own localhost,
-# which the reverse tunnel from run-with-tunnel.sh forwards back here. So:
+# The agent posts PM2 stats back to this dashboard. Where it posts depends on
+# whether the dashboard has an address the servers can reach:
 #
-#     run-with-tunnel.sh must be running for the agent to reach the dashboard.
+#   * Dashboard on a server (the normal case now). Set DASHBOARD_URL in .env to
+#     its real address, e.g.
+#         DASHBOARD_URL=https://monitor.wcities.com/api/pm2/report
+#     The agent posts straight there and no tunnel is involved.
+#
+#   * Dashboard on a laptop with no public address. Leave DASHBOARD_URL unset
+#     and it falls back to REMOTE_AGENT_PORT on the server's own localhost,
+#     which the reverse forward from run-with-tunnel.sh brings back here - so
+#     run-with-tunnel.sh has to stay running for the agent to reach anything.
 #
 # The agent is registered with pm2 under the name `ops-dashboard-agent`, so it
 # survives reboots once you've run `pm2 save` on that server.
@@ -34,7 +41,7 @@ if [ "${1:-}" = "--stop" ]; then STOP=1; shift; fi
 if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   while IFS='=' read -r key value; do
     case "$key" in
-      SSH_USER|SSH_HOST|SSH_PORT|SSH_PASSWORD|SSH_KEY|REMOTE_AGENT_PORT|OPS_AGENT_SECRET)
+      SSH_USER|SSH_HOST|SSH_PORT|SSH_PASSWORD|SSH_KEY|REMOTE_AGENT_PORT|OPS_AGENT_SECRET|DASHBOARD_URL)
         value="${value%$'\r'}"
         value="${value%\"}"; value="${value#\"}"
         value="${value%\'}"; value="${value#\'}"
@@ -70,6 +77,9 @@ done
 SSH_USER="${SSH_USER:-fcampbell}"
 SSH_PORT="${SSH_PORT:-22}"
 REMOTE_AGENT_PORT="${REMOTE_AGENT_PORT:-8777}"
+# Where the agent posts. Falls back to the reverse-tunnel form only when nothing
+# is configured, so the laptop setup keeps working untouched.
+DASHBOARD_URL="${DASHBOARD_URL:-http://127.0.0.1:$REMOTE_AGENT_PORT/api/pm2/report}"
 APP_NAME="ops-dashboard-agent"
 # Relative to the login home directory. scp does not shell-expand the remote
 # path, so this must not contain $HOME or ~.
@@ -119,7 +129,7 @@ run_remote "
   set -e
   cd ~/$REMOTE_DIR
   export SERVER_ID=\"\$(hostname)\"
-  export DASHBOARD_URL='http://127.0.0.1:$REMOTE_AGENT_PORT/api/pm2/report'
+  export DASHBOARD_URL='$DASHBOARD_URL'
   export AGENT_SECRET='$OPS_AGENT_SECRET'
   export INTERVAL_SECONDS=5
   pm2 delete $APP_NAME >/dev/null 2>&1 || true
@@ -131,5 +141,10 @@ run_remote "
 "
 
 echo
-echo "Deployed to $TARGET. The Processes tab should show it within ~10s,"
-echo "as long as ./run-with-tunnel.sh is running."
+echo "Deployed to $TARGET, posting to $DASHBOARD_URL"
+echo "The Processes tab should show it within ~10s."
+case "$DASHBOARD_URL" in
+  *127.0.0.1*|*localhost*)
+    echo "That is a localhost URL, so it only arrives while ./run-with-tunnel.sh"
+    echo "is running. Set DASHBOARD_URL in .env to post directly instead." ;;
+esac
