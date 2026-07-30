@@ -111,9 +111,14 @@ class Scheduler:
         self._tasks = [
             asyncio.create_task(self._loop("counts", self.run_counts)),
             asyncio.create_task(self._loop("health", self.run_health)),
-            asyncio.create_task(self._loop("crons", self.run_crons)),
             asyncio.create_task(self._prune_loop()),
         ]
+        # Started only in ssh mode. With cron_source: agent the servers push
+        # their crontabs to /api/cron/report and this process never opens an SSH
+        # session - which is the point: no stored passwords, no askpass, and
+        # nothing to prompt on a terminal.
+        if self.config.cron_source == "ssh":
+            self._tasks.append(asyncio.create_task(self._loop("crons", self.run_crons)))
 
     async def stop(self) -> None:
         for task in self._tasks:

@@ -1,0 +1,52 @@
+#
+# systemd unit for the Ops Dashboard.
+#
+# Install (as root, on the dashboard server):
+#     cp ops-dashboard.service /etc/systemd/system/
+#     systemctl daemon-reload
+#     systemctl enable --now ops-dashboard
+#
+# Then:  systemctl status ops-dashboard      is it up
+#        journalctl -u ops-dashboard -f      live log, replaces the terminal
+#
+# Paths assume the checkout at /home/fcampbell/ops-dashboard. Adjust User and
+# the three paths below if that changes.
+#
+[Unit]
+Description=Ops Dashboard (partner counts, website health, PM2)
+Documentation=file:/home/fcampbell/ops-dashboard/Dashboard/README.md
+# Local MySQL - harmless if neither unit exists on this box.
+After=network-online.target mariadb.service mysqld.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fcampbell
+Group=fcampbell
+WorkingDirectory=/home/fcampbell/ops-dashboard/Dashboard
+
+# The hourly count sweep fires on the top of the LOCAL hour. Without this the
+# server's UTC clock puts every run at :30 IST, which reads as a broken
+# schedule to anyone watching the clock.
+Environment=TZ=Asia/Kolkata
+
+# Bound to localhost on purpose: nginx terminates TLS and proxies to it. The UI
+# and most of the API have no authentication, so this must not listen publicly.
+ExecStart=/home/fcampbell/ops-dashboard/Dashboard/venv/bin/python -m uvicorn \
+          dashboard:app --host 127.0.0.1 --port 5603
+
+Restart=always
+RestartSec=5
+# The count sweep can hold a MySQL query for well over a minute; don't let a
+# stop request kill it mid-flight without warning.
+TimeoutStopSec=90
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ops-dashboard
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

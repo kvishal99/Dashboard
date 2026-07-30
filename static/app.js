@@ -143,6 +143,10 @@ function startPolling(fn, ms) {
  * job reports its real 24h run count too - that number is the whole point of
  * scheduling it on the hour, so it shouldn't have to be taken on trust. */
 function jobCadence(job) {
+  if (job.schedule === 'push') {
+    const n = job.servers_reporting ?? 0;
+    return `pushed by ${n} server${n === 1 ? '' : 's'}`;
+  }
   if (job.schedule === 'hourly') {
     const runs = job.runs_24h ?? 0;
     return `on the hour · ${runs} run${runs === 1 ? '' : 's'} in 24h`;
@@ -156,8 +160,9 @@ function jobLine(job) {
   if (!job) return '';
   const bits = [
     job.running ? `running now${job.progress ? ` (${esc(job.progress)})` : ''}`
-                : `last run ${timeAgo(job.last_run)}`,
-    `next ${timeUntil(job.next_run)}`,
+                : `last ${job.schedule === 'push' ? 'report' : 'run'} ${timeAgo(job.last_run)}`,
+    // A pushed job has no "next" this side knows about - the server decides.
+    ...(job.schedule === 'push' ? [] : [`next ${timeUntil(job.next_run)}`]),
     jobCadence(job),
   ];
   if (job.last_error) bits.push(`<span class="err">error: ${esc(job.last_error)}</span>`);

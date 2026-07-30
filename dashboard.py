@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import cron_parse
 import jobs as jobs_mod
 import mysql
 from config import BASE_DIR, load_config
@@ -382,6 +383,42 @@ async def api_pm2_report(payload: Dict[str, Any], x_agent_secret: str = Header(N
     return {"status": "ok"}
 
 
+class CronReport(BaseModel):
+    """A server's own crontab, pushed by agent.py.
+
+    The server reads `crontab -l` and stats its own log files, so the dashboard
+    needs no SSH access, no credentials and no inbound login anywhere. Parsing
+    stays here rather than in the agent: cron_parse is the tested code, and the
+    agent must remain a dependency-free file that runs on old Pythons.
+    """
+    server_id: str
+    # How the rows are keyed - the server's IP, to match the partner sheet.
+    server: Optional[str] = None
+    hostname: Optional[str] = None
+    crontab: str = ""
+    # path -> {"mtime": float, "size": int}, stat-ed on the server itself.
+    logs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+@app.post("/api/cron/report")
+async def api_cron_report(report: CronReport, x_agent_secret: str = Header(None)):
+    if x_agent_secret != config.agent_secret:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    rows = cron_parse.parse_crontab(report.crontab, set(config.partner_meta.keys()))
+    for row in rows:
+        stat = report.logs.get(row["log_file"]) if row["log_file"] else None
+        if stat:
+            row["log_mtime"] = stat.get("mtime")
+            row["log_size"] = stat.get("size")
+
+    server = report.server or report.server_id
+    # Wholesale replace, exactly as the SSH collector did: a job deleted on the
+    # server has to disappear here too, not linger as a phantom.
+    store.replace_cron_jobs(server, report.hostname or report.server_id, rows)
+    return {"status": "ok", "server": server, "jobs": len(rows)}
+
+
 @app.get("/api/pm2/status")
 async def api_pm2_status():
     return {
@@ -489,10 +526,31 @@ async def api_cron():
             round((now - r["log_mtime"]) / 86400.0, 1) if r["log_mtime"] else None
         )
     servers = store.cron_servers()
+    if config.cron_source == "agent":
+        # Nothing is scheduled on this side - the servers push. Report when the
+        # last one did, so a silent agent is visible rather than looking like
+        # data that simply never changes.
+        reported = [s["collected_at"] for s in servers if s.get("collected_at")]
+        job = {
+            "name": "crons",
+            "schedule": "push",
+            "interval_seconds": 0,
+            "last_run": max(reported) if reported else None,
+            "next_run": None,
+            "running": False,
+            "progress": "",
+            "last_error": None,
+            "runs": len(servers),
+            "runs_24h": sum(1 for t in reported if t >= now - 86400),
+            "servers_reporting": len(servers),
+        }
+    else:
+        job = scheduler.status().get("crons")
     return {
         "jobs": rows,
         "servers": servers,
-        "job": scheduler.status().get("crons"),
+        "job": job,
+        "source": config.cron_source,
         "summary": {
             "total": len(rows),
             "servers": len(servers),

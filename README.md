@@ -260,7 +260,7 @@ a strict hourly cron and nothing else touches MySQL on a timer.
 | Partner counts | top of every hour — 24 runs/day | yes, 1 grouped query |
 | Website health | every 30s | no |
 | PM2 processes | pushed by `agent.py` every 5s | no |
-| Server crontabs | every 6h (SSH) | no |
+| Server crontabs | pushed by each server every 6h | no |
 | Every dashboard page | polls its own SQLite every 5–20s | no |
 
 The pages poll often and feel live, but they read the dashboard's own SQLite —
@@ -512,17 +512,40 @@ that runs nightly and correctly finds nothing new looks identical to one that
 died. To distinguish them you need the script to report in — see
 `report_to_dashboard.php`, which records the feed total on every run.
 
-## Cron tab — every crontab entry on every reachable server
+## Cron tab — every crontab entry on every reporting server
 
-**Collected automatically.** The dashboard re-reads every crontab as a
-background job on a 6-hour cycle (`app.cron_interval_seconds`), first run ~10s
-after startup. Nothing to run by hand.
+**The servers push, the dashboard never logs in.** `agent.py` — the same agent
+that reports PM2 — also reads its own `crontab -l`, stats its own redirect
+targets, and POSTs both to `/api/cron/report` every `CRON_INTERVAL_SECONDS`
+(6h by default). It retries on the 5s PM2 tick until one succeeds, so a
+dashboard that was down at startup doesn't cost six hours of missing data.
 
-The interval is long on purpose: it opens an SSH session per host and stats
-every log file (~18s for 426 jobs across 3 servers), and crontabs rarely change.
-It's the last of the three jobs to start, so the faster tabs fill first.
+This is set by `app.cron_source`:
 
-To force a refresh immediately:
+| `cron_source` | How the data arrives | SSH? |
+|---|---|---|
+| `agent` (default) | servers POST to `/api/cron/report` | **no** |
+| `ssh` | the dashboard logs into each host and reads them | yes |
+
+In `agent` mode no SSH job is started at all — no stored SSH passwords, nothing
+that can hang on a password prompt, and nothing to break when a box's
+credentials change. It also works for servers the dashboard has no route to,
+since the connection is outbound from them.
+
+Parsing stays on the dashboard (`cron_parse.py`) rather than in the agent: the
+agent has to remain a single dependency-free file that runs on old Pythons, and
+`cron_parse` is the tested code. Rows are keyed by `SERVER_IP`, which
+`deploy-agent.sh` sets to the host it deployed to — that must match the server
+column in the partner sheet, or the Jobs tab can't tell that a partner's cron
+lives on that box.
+
+Requests are authenticated with `x-agent-secret`, the same shared secret the PM2
+endpoint uses. A wrong secret is a 401.
+
+### The old SSH collector
+
+Still present and still works — set `cron_source: ssh` to use it, and it stays
+the only option for a server you can't or won't run the agent on:
 
 ```bash
 ./venv/bin/python collect-crons.py            # all hosts in .env
@@ -530,11 +553,11 @@ To force a refresh immediately:
 ./venv/bin/python collect-crons.py --dry-run
 ```
 
-The logic lives in `cron_collect.py`; both the CLI and the scheduler call it, so
-there is one code path.
-
 Hosts come from `SSH_HOST` + `AGENT_HOSTS`, with per-host credentials. A host
-that can't be reached is reported and skipped, never blocking the others.
+that can't be reached is reported and skipped, never blocking the others. Note
+that password auth needs `setsid` on the box running it: ssh prompts on the
+terminal otherwise, because `SSH_ASKPASS_REQUIRE` only exists in OpenSSH ≥ 8.4
+and RHEL/Rocky 8 ships 8.0.
 
 Current state — **425 jobs across 3 servers**:
 

@@ -185,9 +185,11 @@ async function refresh() {
   renderStats(data.summary, data.servers);
   // Collection is a scheduled background job, so show its state rather than
   // telling the user to run a script.
-  document.getElementById('collected').innerHTML = data.job
+  document.getElementById('collected').innerHTML = data.job && data.job.last_run
     ? jobLine(data.job)
-    : 'run collect-crons.py to populate';
+    : (data.source === 'agent'
+        ? 'no server has reported a crontab yet — deploy agent.py with ./deploy-agent.sh'
+        : 'run collect-crons.py to populate');
   renderTable();
 }
 

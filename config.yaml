@@ -28,9 +28,14 @@ app:
   # Websites hit no database, so they are checked every 30s. The sites page
   # polls its own SQLite rows every 10s, which costs MySQL nothing.
   health_interval_seconds: 30
-  # How often the servers' crontabs are re-read, in seconds (default 6 hours).
-  # This one opens an SSH session per host and stats every log file, so it is
-  # much heavier than the others - and crontabs rarely change.
+  # Where the Cron tab's data comes from.
+  #   agent - each server pushes its own `crontab -l` to /api/cron/report via
+  #           agent.py. The dashboard opens no SSH sessions at all, stores no
+  #           SSH passwords, and cannot hang on a password prompt.
+  #   ssh   - the old way: the dashboard logs into every host and reads them.
+  cron_source: agent
+  # Only used when cron_source is ssh. In agent mode the cadence is set on the
+  # server instead, by CRON_INTERVAL_SECONDS in the agent's environment.
   cron_interval_seconds: 21600
   # A PM2 server is shown as OFFLINE if it hasn't reported in this long.
   pm2_stale_seconds: 30

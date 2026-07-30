@@ -129,9 +129,13 @@ run_remote "
   set -e
   cd ~/$REMOTE_DIR
   export SERVER_ID=\"\$(hostname)\"
+  # Cron rows are keyed by this, so it must match the server column in the
+  # partner sheet (the IP) or the Jobs tab can't match a partner to this box.
+  export SERVER_IP='$TARGET'
   export DASHBOARD_URL='$DASHBOARD_URL'
   export AGENT_SECRET='$OPS_AGENT_SECRET'
   export INTERVAL_SECONDS=5
+  export CRON_INTERVAL_SECONDS=${CRON_INTERVAL_SECONDS:-21600}
   pm2 delete $APP_NAME >/dev/null 2>&1 || true
   pm2 start agent.py --name $APP_NAME --interpreter python3 --update-env >/dev/null
   pm2 save >/dev/null 2>&1 || true

@@ -35,6 +35,9 @@ APP_DEFAULTS = {
     "counts_interval_seconds": 3600,
     "counts_hourly": True,
     "health_interval_seconds": 30,
+    # "agent" - servers push their own crontabs to /api/cron/report (no SSH).
+    # "ssh"   - the dashboard logs into each server and reads them itself.
+    "cron_source": "agent",
     "cron_interval_seconds": 21600,
     "pm2_stale_seconds": 30,
     "db_path": "ops.db",
@@ -79,6 +82,9 @@ class Config:
         self.counts_hourly: bool = bool(app["counts_hourly"])
         self.health_interval: int = int(app["health_interval_seconds"])
         self.cron_interval: int = int(app["cron_interval_seconds"])
+        # Only "ssh" makes the dashboard log into anything. Anything else means
+        # the agents push, and no SSH job is started at all.
+        self.cron_source: str = str(app["cron_source"]).strip().lower()
         self.pm2_stale_seconds: int = int(app["pm2_stale_seconds"])
         self.max_concurrent_queries: int = int(app["max_concurrent_queries"])
         self.history_keep_days: int = int(app["history_keep_days"])
