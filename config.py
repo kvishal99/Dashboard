@@ -30,11 +30,15 @@ ENV_PATH = _find_env()
 
 APP_DEFAULTS = {
     "agent_secret": "change-this-to-a-secure-token",
-    "counts_interval_seconds": 1800,
-    "health_interval_seconds": 120,
+    # The DB sweep runs on the hour, so this is only the fallback cadence used
+    # when counts_hourly is turned off.
+    "counts_interval_seconds": 3600,
+    "counts_hourly": True,
+    "health_interval_seconds": 30,
     "cron_interval_seconds": 21600,
     "pm2_stale_seconds": 30,
     "db_path": "ops.db",
+    "history_keep_days": 90,
     "max_concurrent_queries": 4,
 }
 
@@ -70,10 +74,14 @@ class Config:
         # The shared secret belongs in .env, not in config.yaml.
         self.agent_secret: str = os.environ.get("OPS_AGENT_SECRET") or app["agent_secret"]
         self.counts_interval: int = int(app["counts_interval_seconds"])
+        # True = fire on the top of every hour (24 MySQL sweeps a day, no drift).
+        # False = plain timer on counts_interval_seconds.
+        self.counts_hourly: bool = bool(app["counts_hourly"])
         self.health_interval: int = int(app["health_interval_seconds"])
         self.cron_interval: int = int(app["cron_interval_seconds"])
         self.pm2_stale_seconds: int = int(app["pm2_stale_seconds"])
         self.max_concurrent_queries: int = int(app["max_concurrent_queries"])
+        self.history_keep_days: int = int(app["history_keep_days"])
 
         db_path = app["db_path"]
         self.db_path = db_path if os.path.isabs(db_path) else os.path.join(BASE_DIR, db_path)

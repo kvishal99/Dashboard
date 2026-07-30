@@ -139,6 +139,18 @@ function startPolling(fn, ms) {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 }
 
+/* How often a job fires, in the terms it is actually scheduled by. The hourly
+ * job reports its real 24h run count too - that number is the whole point of
+ * scheduling it on the hour, so it shouldn't have to be taken on trust. */
+function jobCadence(job) {
+  if (job.schedule === 'hourly') {
+    const runs = job.runs_24h ?? 0;
+    return `on the hour · ${runs} run${runs === 1 ? '' : 's'} in 24h`;
+  }
+  const secs = job.interval_seconds;
+  return secs < 60 ? `every ${secs}s` : `every ${Math.round(secs / 60)} min`;
+}
+
 /* One-line job summary for a panel header. */
 function jobLine(job) {
   if (!job) return '';
@@ -146,7 +158,7 @@ function jobLine(job) {
     job.running ? `running now${job.progress ? ` (${esc(job.progress)})` : ''}`
                 : `last run ${timeAgo(job.last_run)}`,
     `next ${timeUntil(job.next_run)}`,
-    `every ${Math.round(job.interval_seconds / 60)} min`,
+    jobCadence(job),
   ];
   if (job.last_error) bits.push(`<span class="err">error: ${esc(job.last_error)}</span>`);
   return bits.join(' · ');

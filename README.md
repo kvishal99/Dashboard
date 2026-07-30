@@ -249,13 +249,35 @@ trends; switch `OPS_DB_HOST` to the master when you want authoritative numbers.
 
 Run with `OPS_DISABLE_SCHEDULER=1` to serve the UI without any background jobs.
 
-### Query cost
+### Query cost, and how often each thing runs
 
-A full cycle re-counts all 55 partners, 4 at a time. Most partners take ~1s, but
-the largest (`fever`, ~863k rows) takes ~45s, so a full pass is a few minutes.
-That's why `counts_interval_seconds` defaults to 1800 (30 min). If you want it
-faster, add an index on `partner` (and ideally `(partner, published, enddates)`)
-rather than lowering the interval.
+The scheduled sweep is **one** grouped query covering every partner (~75s over
+2.9M rows), not 55 separate ones. It still scans the whole table, so it runs on
+a strict hourly cron and nothing else touches MySQL on a timer.
+
+| What | Cadence | Touches MySQL |
+| --- | --- | --- |
+| Partner counts | top of every hour — 24 runs/day | yes, 1 grouped query |
+| Website health | every 30s | no |
+| PM2 processes | pushed by `agent.py` every 5s | no |
+| Server crontabs | every 6h (SSH) | no |
+| Every dashboard page | polls its own SQLite every 5–20s | no |
+
+The pages poll often and feel live, but they read the dashboard's own SQLite —
+opening a page, or leaving one open all day, adds **zero** MySQL queries. Only
+the hourly sweep and the explicit *Refresh counts* / *Refresh this partner*
+buttons do.
+
+`counts_hourly` fires on the hour rather than every 3600s because an interval
+timer can't hold 24-a-day: it starts each wait only after the previous run
+finishes, so a 75s sweep pushes every later run deeper into the hour, and each
+restart begins a fresh cycle. Restarting doesn't buy an extra sweep either — on
+startup the dashboard collects only if the stored counts are already over an
+hour old. The panel header on the Partners and Jobs pages shows the actual
+number of runs in the last 24h, so the schedule is verifiable, not just claimed.
+
+If you need the counts fresher than hourly, add an index on `partner` (and
+ideally `(partner, published, enddates)`) first, then decide.
 
 ## Configuration
 
@@ -263,13 +285,16 @@ Everything lives in `config.yaml`.
 
 ```yaml
 app:
-  counts_interval_seconds: 1800   # how often all 55 partners are re-counted
-  health_interval_seconds: 120    # how often websites are polled
-  max_concurrent_queries: 4       # parallel MySQL queries
+  counts_hourly: true             # DB sweep on the top of every hour (24/day)
+  counts_interval_seconds: 3600   # fallback, used only if counts_hourly is false
+  health_interval_seconds: 30     # how often websites are polled (no DB)
+  pm2_stale_seconds: 30           # PM2 server shown OFFLINE after this silence
+  max_concurrent_queries: 4       # parallel MySQL queries (per-partner button only)
 ```
 
-`counts_interval_seconds` defaults to 30 minutes because these are `COUNT()`
-queries over a large table. Don't drop it to seconds.
+Set `counts_hourly: false` to go back to a plain interval timer on
+`counts_interval_seconds`. Don't drop that to seconds — these are `COUNT()`
+queries over a large table.
 
 Secrets come from `.env` (or the environment) and override `config.yaml`:
 `OPS_DB_HOST`, `OPS_DB_PORT`, `OPS_DB_USER`, `OPS_DB_PASSWORD`, `OPS_DB_NAME`.

@@ -156,6 +156,18 @@ class Store:
             ).fetchall()
         return {r["partner"]: dict(r) for r in rows}
 
+    def last_counts_at(self) -> Optional[float]:
+        """When any partner count was last collected, or None if never.
+
+        The hourly scheduler reads this on startup to decide whether a restart
+        deserves an immediate sweep or should just wait for the next hour.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(collected_at) AS last FROM partner_counts"
+            ).fetchone()
+        return row["last"] if row and row["last"] is not None else None
+
     def counts_history(self, partner: str, limit: int = 60) -> List[Dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
