@@ -88,7 +88,7 @@ Anything can post it — the endpoint takes a `source` of `script`, `file`, `api
 or `manual`:
 
 ```bash
-curl -X POST http://localhost:8000/api/partners/feed-count \
+curl -X POST http://localhost:5603/api/partners/feed-count \
   -H 'Content-Type: application/json' \
   -H "x-agent-secret: $OPS_AGENT_SECRET" \
   -d '{"partner":"bokun","feed_count":85000,"inserted":1900,"source":"script"}'
@@ -345,7 +345,7 @@ This laptop has no public address, so the agent cannot POST to it directly.
 
 ```
 -L 3307:127.0.0.1:3306          this laptop:3307  ->  server's MySQL
--R 8777:127.0.0.1:8000          server:8777       ->  this laptop's dashboard
+-R 8777:127.0.0.1:5603          server:8777       ->  this laptop's dashboard
 ```
 
 The agent posts to `http://127.0.0.1:8777/api/pm2/report` on its own machine,

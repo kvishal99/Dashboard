@@ -531,4 +531,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 5603 is the port this dashboard is allocated - 8000 is not available to us.
+    # Overridable so a second instance can run alongside the first, and so this
+    # entry point agrees with run-with-tunnel.sh instead of hardcoding its own.
+    uvicorn.run(
+        app,
+        host=os.environ.get("APP_HOST", "0.0.0.0"),
+        port=int(os.environ.get("APP_PORT", "5603")),
+    )

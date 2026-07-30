@@ -52,7 +52,7 @@ SSH_USER="${SSH_USER:-fcampbell}"
 SSH_HOST="${SSH_HOST:-100.52.8.134}"
 SSH_PORT="${SSH_PORT:-22}"
 LOCAL_PORT="${LOCAL_PORT:-3307}"
-APP_PORT="${APP_PORT:-8000}"
+APP_PORT="${APP_PORT:-5603}"
 # Port opened ON THE SERVER that forwards back to this machine's dashboard, so
 # agent.py there can POST its PM2 stats to a laptop that has no public address.
 REMOTE_AGENT_PORT="${REMOTE_AGENT_PORT:-8777}"
