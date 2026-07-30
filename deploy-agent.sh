@@ -28,9 +28,11 @@ cd "$(dirname "$0")"
 # .env lives beside this script, or one level up when the code sits in a
 # subdirectory (e.g. a git repo checked out as ./Dashboard) and .env is kept
 # outside it. OPS_ENV_FILE overrides both.
+# Same order config.py uses: beside the script first, then one level up. They
+# must agree - a stray .env here that shadows the real one is very hard to spot.
 ENV_FILE="${OPS_ENV_FILE:-}"
 if [ -z "$ENV_FILE" ]; then
-  if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then ENV_FILE=".env"
+  if [ -f .env ]; then ENV_FILE=".env"
   elif [ -f ../.env ]; then ENV_FILE="../.env"
   fi
 fi
