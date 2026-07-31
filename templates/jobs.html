@@ -44,6 +44,7 @@
       <tbody id="tbody"></tbody>
     </table>
   </div>
+  <div id="legend"></div>
 </div>
 {% endblock %}
 
@@ -54,13 +55,13 @@ let ROWS = [];
 /* Job state always ships with a word, never colour alone. */
 function jobBadge(state) {
   switch (state) {
-    case 'ok':      return '<span class="badge up">RUNNING</span>';
-    case 'late':    return '<span class="badge warn">LATE</span>';
-    case 'stalled': return '<span class="badge down">STALLED</span>';
-    case 'never':   return '<span class="badge down">NEVER RAN</span>';
-    case 'retired': return '<span class="badge unknown">RETIRED</span>';
-    case 'dormant': return '<span class="badge unknown">DORMANT</span>';
-    default:        return '<span class="badge unknown">NO SCHEDULE</span>';
+    case 'ok':      return badge('up', 'RUNNING', 'jobs');
+    case 'late':    return badge('warn', 'LATE', 'jobs');
+    case 'stalled': return badge('down', 'STALLED', 'jobs');
+    case 'never':   return badge('down', 'NEVER RAN', 'jobs');
+    case 'retired': return badge('unknown', 'RETIRED', 'jobs');
+    case 'dormant': return badge('unknown', 'DORMANT', 'jobs');
+    default:        return badge('unknown', 'NO SCHEDULE', 'jobs');
   }
 }
 
@@ -70,16 +71,16 @@ function jobBadge(state) {
 function cronCell(r) {
   switch (r.cron_status) {
     case 'found':
-      return `<span class="badge up">SCHEDULED</span>`
+      return badge('up', 'SCHEDULED', 'cron_entry')
            + (r.cron_schedule ? `<div class="muted" style="font-size:0.7rem">${esc(r.cron_schedule)}</div>` : '');
     case 'disabled':
-      return '<span class="badge warn">COMMENTED OUT</span>'
+      return badge('warn', 'COMMENTED OUT', 'cron_entry')
            + '<div class="muted" style="font-size:0.7rem">in crontab but disabled</div>';
     case 'missing':
-      return '<span class="badge down">NO CRON</span>'
+      return badge('down', 'NO CRON', 'cron_entry')
            + '<div class="muted" style="font-size:0.7rem">server checked, none found</div>';
     default:
-      return '<span class="badge unknown">NOT COLLECTED</span>'
+      return badge('unknown', 'NOT COLLECTED', 'cron_entry')
            + '<div class="muted" style="font-size:0.7rem">run collect-crons.py</div>';
   }
 }
@@ -173,6 +174,7 @@ async function refresh() {
 document.getElementById('filter').addEventListener('input', renderTable);
 document.getElementById('only-broken').addEventListener('change', renderTable);
 wireRefresh('refresh-all', '/api/counts/refresh', refresh);
+document.getElementById('legend').innerHTML = statusLegend(['jobs', 'cron_entry'], 'What these statuses mean — job state, then cron entry');
 startPolling(refresh, 20000);
 </script>
 {% endblock %}

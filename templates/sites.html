@@ -41,6 +41,7 @@
       <tbody id="tbody"></tbody>
     </table>
   </div>
+  <div id="legend"></div>
 </div>
 {% endblock %}
 
@@ -99,7 +100,7 @@ async function refresh() {
   document.getElementById('tbody').innerHTML = data.sites.map((s, i) => `
     <tr>
       <td class="name">${esc(s.name)}<div class="muted mono" style="font-weight:400">${esc(s.url)}</div></td>
-      <td>${statusBadge(s.ok, { unknown: 'NOT CHECKED' })}
+      <td>${statusBadge(s.ok, { unknown: 'NOT CHECKED' }, 'sites')}
         ${s.error ? `<div class="err" style="max-width:34ch">${esc(s.error)}</div>` : ''}</td>
       <td class="num">${s.status_code ?? '—'}<div class="muted" style="font-size:0.7rem">want ${s.expect_status}</div></td>
       <td class="num">${s.latency_ms !== null ? s.latency_ms + ' ms' : '—'}</td>
@@ -110,6 +111,7 @@ async function refresh() {
     </tr>`).join('');
 }
 
+document.getElementById('legend').innerHTML = statusLegend('sites');
 wireRefresh('refresh-sites', '/api/sites/refresh', refresh);
 startPolling(refresh, 10000);
 </script>

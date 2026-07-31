@@ -36,6 +36,7 @@
       <tbody id="tbody"></tbody>
     </table>
   </div>
+  <div id="legend"></div>
 </div>
 {% endblock %}
 
@@ -50,9 +51,12 @@ function uptimeFrom(ms) {
 }
 
 function procBadge(status) {
-  if (status === 'online') return '<span class="badge up">ONLINE</span>';
-  if (status === 'errored') return `<span class="badge down">${esc(status).toUpperCase()}</span>`;
-  return `<span class="badge warn">${esc(status || 'unknown').toUpperCase()}</span>`;
+  if (status === 'online') return badge('up', 'ONLINE', 'processes');
+  if (status === 'errored') return badge('down', String(status).toUpperCase(), 'processes');
+  // Every other PM2 word - stopped, launching, stopping - shares one
+  // explanation, looked up by the catch-all row rather than by label.
+  return badge('warn', String(status || 'unknown').toUpperCase(), null,
+               statusHelp('processes', 'STOPPED / LAUNCHING / …'));
 }
 
 function renderStats(servers) {
@@ -95,8 +99,8 @@ async function refresh() {
   const rows = [];
   data.servers.forEach((srv) => {
     const header = `${esc(srv.server_id)} ${srv.stale
-      ? '<span class="badge down">OFFLINE</span>'
-      : '<span class="badge up">LIVE</span>'}`;
+      ? badge('down', 'OFFLINE', 'processes')
+      : badge('up', 'LIVE', 'processes')}`;
 
     if (!srv.processes.length) {
       rows.push(`<tr><td class="name">${header}</td>
@@ -119,6 +123,7 @@ async function refresh() {
   document.getElementById('tbody').innerHTML = rows.join('');
 }
 
+document.getElementById('legend').innerHTML = statusLegend('processes', 'What these statuses mean — server, then process');
 startPolling(refresh, 5000);
 </script>
 {% endblock %}

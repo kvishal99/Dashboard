@@ -50,6 +50,7 @@
       <tbody id="tbody"></tbody>
     </table>
   </div>
+  <div id="legend"></div>
 </div>
 {% endblock %}
 
@@ -119,11 +120,11 @@ function renderTable() {
 
   document.getElementById('tbody').innerHTML = visible.map((r) => {
     let status;
-    if (r.ok === null) status = '<span class="badge unknown">NOT CHECKED</span>';
-    else if (r.ok === false) status = '<span class="badge down">QUERY FAILED</span>';
-    else if (r.feed_total > 0 && r.db_future === 0) status = '<span class="badge down">NONE LIVE</span>';
-    else if (r.live_pct !== null && r.live_pct < 50) status = '<span class="badge warn">MOSTLY PAST</span>';
-    else status = '<span class="badge up">OK</span>';
+    if (r.ok === null) status = badge('unknown', 'NOT CHECKED', 'partners');
+    else if (r.ok === false) status = badge('down', 'QUERY FAILED', 'partners');
+    else if (r.feed_total > 0 && r.db_future === 0) status = badge('down', 'NONE LIVE', 'partners');
+    else if (r.live_pct !== null && r.live_pct < 50) status = badge('warn', 'MOSTLY PAST', 'partners');
+    else status = badge('up', 'OK', 'partners');
 
     let delta = '<span class="muted">—</span>';
     if (r.delta_future !== null && r.delta_future !== 0) {
@@ -175,6 +176,7 @@ async function refresh() {
   renderTable();
 }
 
+document.getElementById('legend').innerHTML = statusLegend('partners');
 document.getElementById('filter').addEventListener('input', renderTable);
 document.getElementById('only-problems').addEventListener('change', renderTable);
 makeSortable('partner-table', sortState, renderTable);

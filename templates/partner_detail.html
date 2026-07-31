@@ -42,6 +42,7 @@
       <tbody id="history"></tbody>
     </table>
   </div>
+  <div id="legend"></div>
 </div>
 {% endblock %}
 
@@ -89,7 +90,7 @@ function renderHistory(rows) {
       <td class="num">${fmtNum(unpub)}</td>
       <td>${meter(pct)}</td>
       <td class="num muted">${h.duration_ms ? (h.duration_ms / 1000).toFixed(1) + 's' : '—'}</td>
-      <td>${h.ok ? '<span class="badge up">OK</span>' : '<span class="badge down">FAILED</span>'}
+      <td>${h.ok ? badge('up', 'OK', 'history') : badge('down', 'FAILED', 'history')}
         ${h.error ? `<div class="err" style="max-width:40ch">${esc(h.error)}</div>` : ''}</td>
     </tr>`;
   }).join('');
@@ -105,6 +106,7 @@ async function refresh() {
 }
 
 wireRefresh('refresh-one', `/api/partners/${encodeURIComponent(PARTNER)}/refresh`, refresh);
+document.getElementById('legend').innerHTML = statusLegend('history');
 startPolling(refresh, 20000);
 </script>
 {% endblock %}

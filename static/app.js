@@ -71,12 +71,95 @@ function meter(pct) {
   </div>`;
 }
 
+/* Every status badge the dashboard can show, and what it actually means.
+ *
+ * One definition, used twice: badge() hangs the wording off the badge as a
+ * hover tooltip, and statusLegend() prints the same wording under the table it
+ * belongs to - so the meaning is readable without hovering, and on touch.
+ *
+ * Grouped by column rather than flattened by label, because the same word means
+ * different things in different places: NOT CHECKED on Website health means no
+ * HTTP check has run yet, while on Partners it means no COUNT query has run.
+ *
+ * Each entry is [badge class, label, meaning]. Order is worst-first, matching
+ * how the tables sort.
+ */
+const STATUS_HELP = {
+  sites: [
+    ['down', 'DOWN', 'The last check failed - unexpected status code, timeout, DNS failure or TLS error. The exact reason is printed under the badge. Two failures in a row emails the alert recipients.'],
+    ['unknown', 'NOT CHECKED', 'No check has completed for this site yet. Normal for the first few seconds after a restart; the health job runs every 30s.'],
+    ['up', 'UP', 'The site answered within its timeout, with one of the HTTP status codes config.yaml expects for it (the "want ..." line in the HTTP column).'],
+  ],
+  partners: [
+    ['down', 'QUERY FAILED', 'The last count query against MySQL errored, so every number on this row is stale. The error is shown beneath the badge.'],
+    ['unknown', 'NOT CHECKED', 'No counts have been collected for this partner yet. The MySQL sweep runs on the top of every hour.'],
+    ['down', 'NONE LIVE', 'We hold events for this partner but not one is published and still upcoming - everything has either ended or never went live.'],
+    ['warn', 'MOSTLY PAST', 'Fewer than half the events we hold for this partner are live and upcoming. The rest have already ended or were never published. Expected for a partner whose events are seasonal; worth a look otherwise.'],
+    ['up', 'OK', 'At least half of the events we hold for this partner are published and still upcoming.'],
+  ],
+  jobs: [
+    ['down', 'STALLED', 'Nothing new has been inserted for more than twice the interval its frequency implies. The ingest job is very likely broken.'],
+    ['down', 'NEVER RAN', 'Nothing has ever been inserted for this partner.'],
+    ['warn', 'LATE', 'Overdue, but by less than twice its interval - a weekly job a couple of days behind reads as late rather than broken.'],
+    ['unknown', 'NO SCHEDULE', 'The status sheet gives no frequency for this partner, so there is nothing to measure freshness against.'],
+    ['unknown', 'DORMANT', 'No schedule, 20 or fewer live events, and untouched for over a year. A one-off import or a stray record, not a running job.'],
+    ['unknown', 'RETIRED', "The sheet's note says this partner was switched off deliberately, so stale data is not a fault."],
+    ['up', 'RUNNING', 'The newest event was inserted within the interval its cron frequency implies.'],
+  ],
+  cron_entry: [
+    ['down', 'NO CRON', 'This partner\'s server did report its crontab, and no line for this partner appears in it.'],
+    ['warn', 'COMMENTED OUT', 'A crontab line exists but is commented out, so cron never runs it.'],
+    ['unknown', 'NOT COLLECTED', 'No crontab has been collected from this partner\'s server, so a missing line proves nothing either way.'],
+    ['up', 'SCHEDULED', 'A crontab line for this partner was found on a server that reports its crontab. The schedule is shown beneath.'],
+  ],
+  cron: [
+    ['unknown', 'DISABLED', 'The line is commented out in the crontab, so cron never runs it. Kept visible because a job switched off by accident looks identical to one switched off on purpose.'],
+    ['up', 'ACTIVE', 'A live crontab line - cron runs this on the schedule shown.'],
+  ],
+  processes: [
+    ['down', 'OFFLINE', "Server: no heartbeat from this server's agent recently, so the process list below it is stale. Usually the agent or its tunnel is down, not the app."],
+    ['down', 'ERRORED', 'Process: PM2 reports this process as errored - it crashed or failed to start.'],
+    ['warn', 'STOPPED / LAUNCHING / …', "Process: any other PM2 state, shown in PM2's own words."],
+    ['up', 'LIVE', "Server: this server's agent reported within the staleness window, so its process list is current."],
+    ['up', 'ONLINE', 'Process: PM2 reports this process as running.'],
+  ],
+  history: [
+    ['down', 'FAILED', 'That collection errored - the counts for that timestamp were never recorded.'],
+    ['up', 'OK', 'That collection succeeded.'],
+  ],
+};
+
+function statusHelp(group, label) {
+  const row = (STATUS_HELP[group] || []).find((r) => r[1] === label);
+  return row ? row[2] : '';
+}
+
 /* Status badges always carry a text label; app.css adds a glyph via ::before,
- * so state is never communicated by colour alone. */
-function statusBadge(ok, labels) {
+ * so state is never communicated by colour alone. Pass `group` to attach the
+ * explanation from STATUS_HELP as a tooltip. */
+function badge(cls, label, group, help) {
+  // `help` is for labels that vary at runtime - PM2 reports its own words for
+  // any state that isn't online/errored, so those can't be looked up by label.
+  const text = help || (group ? statusHelp(group, label) : '');
+  return `<span class="badge ${cls}"${text ? ` title="${esc(text)}"` : ''}>${esc(label)}</span>`;
+}
+
+function statusBadge(ok, labels, group) {
   const l = Object.assign({ up: 'UP', down: 'DOWN', unknown: 'NO DATA' }, labels || {});
-  if (ok === null || ok === undefined) return `<span class="badge unknown">${l.unknown}</span>`;
-  return ok ? `<span class="badge up">${l.up}</span>` : `<span class="badge down">${l.down}</span>`;
+  if (ok === null || ok === undefined) return badge('unknown', l.unknown, group);
+  return ok ? badge('up', l.up, group) : badge('down', l.down, group);
+}
+
+/* The same wording as the tooltips, printed under the table. Collapsed by
+ * default so it costs no space once you know the words. */
+function statusLegend(groups, summary) {
+  const rows = [].concat(groups).flatMap((g) => (STATUS_HELP[g] || []));
+  if (!rows.length) return '';
+  return `<details class="legend">
+    <summary>${esc(summary || 'What these statuses mean')}</summary>
+    <dl>${rows.map(([cls, label, text]) =>
+      `<dt>${badge(cls, label)}</dt><dd>${esc(text)}</dd>`).join('')}</dl>
+  </details>`;
 }
 
 /* Exact number, with the lakh/crore shorthand underneath. */

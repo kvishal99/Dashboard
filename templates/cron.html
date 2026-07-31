@@ -44,6 +44,7 @@
       <tbody id="tbody"></tbody>
     </table>
   </div>
+  <div id="legend"></div>
 </div>
 {% endblock %}
 
@@ -173,8 +174,8 @@ function renderTable() {
       <td style="font-size:0.8rem">${out}</td>
       <td class="num">${fmtBytes(r.log_size)}</td>
       <td>${r.disabled
-            ? '<span class="badge unknown">DISABLED</span>'
-            : '<span class="badge up">ACTIVE</span>'}</td>
+            ? badge('unknown', 'DISABLED', 'cron')
+            : badge('up', 'ACTIVE', 'cron')}</td>
     </tr>`;
   }).join('');
 }
@@ -195,6 +196,7 @@ async function refresh() {
 
 document.getElementById('filter').addEventListener('input', renderTable);
 document.getElementById('hide-disabled').addEventListener('change', renderTable);
+document.getElementById('legend').innerHTML = statusLegend('cron');
 startPolling(refresh, 30000);
 </script>
 {% endblock %}
