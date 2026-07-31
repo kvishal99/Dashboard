@@ -2,6 +2,12 @@ venv/
 __pycache__/
 *.pyc
 .env
-*.db
 *.log
-ops.db
+
+# The dashboard's own SQLite history, its WAL sidecars, and the dated copies
+# taken before a deploy. Live data - it belongs on each machine's disk, never
+# in the repo.
+*.db
+ops.db-wal
+ops.db-shm
+ops.db.backup-*
