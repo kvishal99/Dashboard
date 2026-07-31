@@ -351,7 +351,14 @@ async def api_feed_history(partner_name: str, limit: int = Query(60, ge=1, le=50
 
 @app.get("/api/sites")
 async def api_sites():
-    return {"sites": build_site_rows(), "jobs": scheduler.status(), "now": time.time()}
+    return {
+        "sites": build_site_rows(),
+        "jobs": scheduler.status(),
+        # So a misconfigured mail setup is visible on the page itself rather
+        # than only discovered the day an outage goes unreported.
+        "alerts": scheduler.alerter.status(),
+        "now": time.time(),
+    }
 
 
 @app.get("/api/sites/history")
@@ -362,6 +369,27 @@ async def api_site_history(url: str, limit: int = Query(60, ge=1, le=500)):
 @app.post("/api/sites/refresh")
 async def api_sites_refresh(url: Optional[str] = None):
     return await scheduler.run_health(url=url)
+
+
+# ---------------------------------------------------------------------------
+# API - down alerts
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/alerts")
+async def api_alerts(limit: int = Query(50, ge=1, le=500)):
+    """Alert configuration plus the log of what was actually sent."""
+    return {"status": scheduler.alerter.status(), "log": store.recent_alerts(limit)}
+
+
+@app.post("/api/alerts/test")
+async def api_alerts_test():
+    """Send a test mail to every configured recipient.
+
+    The honest way to find out whether alerts work, without waiting for a real
+    outage:  curl -X POST http://localhost:5603/api/alerts/test
+    """
+    return await scheduler.alerter.send_test()
 
 
 # ---------------------------------------------------------------------------

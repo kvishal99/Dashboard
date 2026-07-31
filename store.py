@@ -74,6 +74,33 @@ CREATE TABLE IF NOT EXISTS site_checks (
 );
 CREATE INDEX IF NOT EXISTS idx_check_lookup
     ON site_checks (url, checked_at DESC);
+
+-- One row per site: is it currently considered up or down, since when, and
+-- when we last mailed about it. Persisted rather than kept in memory so a
+-- restart of the dashboard cannot re-send a DOWN mail for an outage that has
+-- already been reported, and so "down since" survives a restart.
+CREATE TABLE IF NOT EXISTS site_alert_state (
+    url        TEXT PRIMARY KEY,
+    state      TEXT NOT NULL,     -- up | down
+    since      REAL NOT NULL,     -- when it entered that state
+    last_sent  REAL               -- last mail sent about this site
+);
+
+-- Every alert mail we tried to send, delivered or not. A failed send is
+-- recorded too: an outage nobody was told about is exactly what you want to
+-- find out later.
+CREATE TABLE IF NOT EXISTS alert_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    url         TEXT NOT NULL,
+    site_name   TEXT,
+    kind        TEXT NOT NULL,    -- down | reminder | recovery | test
+    recipients  TEXT,
+    subject     TEXT,
+    ok          INTEGER NOT NULL,
+    error       TEXT,
+    sent_at     REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alert_log_time ON alert_log (sent_at DESC);
 """
 
 
@@ -311,8 +338,54 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ----------------------------------------------------------------- alerts
+
+    def alert_state(self, url: str) -> Optional[Dict[str, Any]]:
+        """Current up/down state for a site, or None if we've never alerted on it."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM site_alert_state WHERE url = ?", (url,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_alert_state(self, url: str, state: str, since: float,
+                         last_sent: Optional[float]) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO site_alert_state (url, state, since, last_sent)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(url) DO UPDATE SET
+                       state = excluded.state,
+                       since = excluded.since,
+                       last_sent = excluded.last_sent""",
+                (url, state, since, last_sent),
+            )
+
+    def record_alert(self, url: str, site_name: str, kind: str,
+                     recipients: List[str], ok: bool,
+                     error: Optional[str] = None,
+                     subject: Optional[str] = None) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO alert_log
+                   (url, site_name, kind, recipients, subject, ok, error, sent_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (url, site_name, kind, ", ".join(recipients), subject,
+                 1 if ok else 0, error, time.time()),
+            )
+
+    def recent_alerts(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM alert_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def prune(self, keep_days: int = 90) -> None:
         cutoff = time.time() - keep_days * 86400
         with self._conn() as conn:
             conn.execute("DELETE FROM partner_counts WHERE collected_at < ?", (cutoff,))
             conn.execute("DELETE FROM site_checks WHERE checked_at < ?", (cutoff,))
+            # site_alert_state is deliberately not pruned - it is one row per
+            # site and losing it would re-send alerts for ongoing outages.
+            conn.execute("DELETE FROM alert_log WHERE sent_at < ?", (cutoff,))

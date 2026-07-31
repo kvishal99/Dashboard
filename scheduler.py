@@ -29,6 +29,7 @@ import httpx
 
 import counts
 import cron_collect
+from alerts import Alerter
 from config import Config
 from health import check_site
 from store import Store
@@ -104,6 +105,8 @@ class Scheduler:
         }
         self._tasks: List[asyncio.Task] = []
         self._sem = asyncio.Semaphore(config.max_concurrent_queries)
+        # Turns the stream of check results into the few emails a human wants.
+        self.alerter = Alerter(config.alerts, store)
 
     # -------------------------------------------------------------- lifecycle
 
@@ -298,6 +301,10 @@ class Scheduler:
                         latency_ms=res.latency_ms,
                         error=res.error,
                     )
+                # Mail on state changes. evaluate() swallows its own errors, so a
+                # dead SMTP server slows nothing down and stops no checks.
+                for site, res in zip(sites, results):
+                    await self.alerter.evaluate(site, res)
                 job.last_error = None
             finally:
                 job.running = False

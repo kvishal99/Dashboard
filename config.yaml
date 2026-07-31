@@ -123,10 +123,41 @@ websites:
   - name: "eventseeker.com"
     url: "https://www.eventseeker.com"
     # Answered 403 from this machine even with a browser User-Agent, so a
-    # WAF/CDN is blocking this host. Run the dashboard from an allowed
-    # server and tighten this back to plain 200.
+    # WAF/CDN is blocking this host. The apex (https://eventseeker.com)
+    # behaves identically and resolves to the same site, so it is not listed
+    # twice. Run the dashboard from an allowed server and tighten this back
+    # to plain 200.
     expect_status: [200, 403]
     timeout: 15
+  - name: "cityseeker.com"
+    url: "https://cityseeker.com"
+    # Same WAF as eventseeker - 403 from this machine on 2026-07-31, with and
+    # without the www.
+    expect_status: [200, 403]
+    timeout: 15
+  - name: "mvc.wcities.com"
+    url: "https://mvc.wcities.com"
+    expect_status: 200          # observed 200 (redirects to /login)
+    timeout: 15
+  - name: "concierge.wcities.com"
+    url: "https://concierge.wcities.com"
+    expect_status: 200          # observed 200 (redirects to /login)
+    timeout: 15
+  - name: "experience.wcities.com"
+    url: "https://experience.wcities.com"
+    expect_status: 200          # observed 200
+    timeout: 15
+  - name: "nearmyhotel.wcities.com"
+    url: "http://nearmyhotel.wcities.com"
+    # Redirects http -> https and then to a per-hotel path; 200 at the end.
+    # Took ~4s on 2026-07-31, hence the longer timeout.
+    expect_status: 200
+    timeout: 20
+  - name: "rtrlocal.com"
+    url: "https://rtrlocal.com"
+    # Also redirects to a generated path (observed /WASJW) and answers 200.
+    expect_status: 200
+    timeout: 20
   - name: "wcities.com"
     url: "https://www.wcities.com"
     expect_status: 200          # observed 200
@@ -155,6 +186,51 @@ websites:
   #   timeout: 10
 
 
+
+
+####################################################################
+# Email alerts for the sites above.
+#
+# What gets sent, and nothing else:
+#   DOWN       once, after `failures_before_alert` checks fail in a row
+#              (checks are 30s apart, so 2 = about a minute of downtime).
+#              One bad check is not an outage and must not wake anyone.
+#   STILL DOWN a reminder every `repeat_hours` while it stays down.
+#              Set repeat_hours: 0 to switch reminders off.
+#   RECOVERED  once, when it answers `successes_before_recovery` times again.
+#
+# The up/down state is stored in SQLite, so restarting the dashboard does not
+# re-send an alert for an outage that was already reported.
+#
+# The SMTP PASSWORD is not here - it is read from .env / the environment as
+# OPS_SMTP_PASSWORD, like the database password. host/user/recipients can also
+# be overridden by OPS_SMTP_HOST, OPS_SMTP_USER and OPS_ALERT_TO.
+#
+# Until smtp.host and from_address are filled in, alerts are recorded in the
+# alert_log table and shown on the Sites page as "not sent" - nothing is
+# silently dropped, and the health checks keep running either way.
+####################################################################
+alerts:
+  enabled: true
+  recipients:
+    - "farooque@wcities.com"
+    - "ozair@wcities.com"
+    - "mayur@wcities.com"
+    - "rahul@wcities.com"
+  from_address: ""            # e.g. "monitor@wcities.com" (or set OPS_ALERT_FROM)
+  from_name: "Ops Dashboard"
+  failures_before_alert: 2    # ~60s down before the first mail
+  successes_before_recovery: 2
+  repeat_hours: 6             # reminder cadence while still down; 0 = off
+  send_recovery: true
+  dashboard_url: "https://monitor.wcities.com/sites"
+  smtp:
+    host: ""                  # e.g. "smtp.gmail.com" or the wcities mail server
+    port: 587
+    security: starttls        # starttls (587) | ssl (465) | none (local relay)
+    username: ""              # usually the same as from_address
+    # password -> OPS_SMTP_PASSWORD in .env, never in this file
+    timeout: 20
 
 
 ####################################################################

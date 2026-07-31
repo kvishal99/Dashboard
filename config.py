@@ -4,6 +4,8 @@ from typing import Any, Dict, List
 
 import yaml
 
+from alerts import AlertSettings, SmtpSettings
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.environ.get("OPS_CONFIG", os.path.join(BASE_DIR, "config.yaml"))
 
@@ -70,6 +72,60 @@ def _load_dotenv(path: str = ENV_PATH) -> None:
             os.environ.setdefault(key, value)
 
 
+def _split_addresses(value: str) -> List[str]:
+    """Split a comma/space separated address list, dropping blanks."""
+    return [a.strip() for a in value.replace(";", ",").replace(" ", ",").split(",") if a.strip()]
+
+
+def _build_alerts(raw: Dict[str, Any]) -> AlertSettings:
+    """Email alert settings from config.yaml, with environment overrides.
+
+    The SMTP password never belongs in config.yaml, so it is read from the
+    environment / .env only (OPS_SMTP_PASSWORD). Everything else can be set
+    either way, environment winning, which is what lets a server override the
+    recipient list without editing a committed file.
+    """
+    smtp_raw = raw.get("smtp") or {}
+    smtp = SmtpSettings(
+        host=os.environ.get("OPS_SMTP_HOST") or str(smtp_raw.get("host") or "").strip(),
+        port=int(os.environ.get("OPS_SMTP_PORT") or smtp_raw.get("port") or 587),
+        security=(
+            os.environ.get("OPS_SMTP_SECURITY") or smtp_raw.get("security") or "starttls"
+        ).strip().lower(),
+        username=os.environ.get("OPS_SMTP_USER") or str(smtp_raw.get("username") or "").strip(),
+        # Password: environment only, on purpose.
+        password=os.environ.get("OPS_SMTP_PASSWORD", ""),
+        timeout=int(smtp_raw.get("timeout") or 20),
+    )
+
+    recipients = [str(r).strip() for r in (raw.get("recipients") or []) if str(r).strip()]
+    if os.environ.get("OPS_ALERT_TO"):
+        recipients = _split_addresses(os.environ["OPS_ALERT_TO"])
+
+    enabled = raw.get("enabled", True)
+    if os.environ.get("OPS_ALERTS_ENABLED"):
+        enabled = os.environ["OPS_ALERTS_ENABLED"].strip().lower() in ("1", "true", "yes")
+
+    return AlertSettings(
+        enabled=bool(enabled),
+        recipients=recipients,
+        from_address=(
+            os.environ.get("OPS_ALERT_FROM")
+            or str(raw.get("from_address") or "").strip()
+            # A sane default: authenticated SMTP usually requires From to be the
+            # account itself, so fall back to the login rather than to nothing.
+            or smtp.username
+        ),
+        from_name=str(raw.get("from_name") or "Ops Dashboard"),
+        failures_before_alert=max(1, int(raw.get("failures_before_alert") or 2)),
+        successes_before_recovery=max(1, int(raw.get("successes_before_recovery") or 2)),
+        repeat_hours=float(raw.get("repeat_hours", 6)),
+        send_recovery=bool(raw.get("send_recovery", True)),
+        dashboard_url=str(raw.get("dashboard_url") or "https://monitor.wcities.com/sites"),
+        smtp=smtp,
+    )
+
+
 class Config:
     def __init__(self, raw: Dict[str, Any]):
         self.raw = raw
@@ -100,6 +156,7 @@ class Config:
 
         self.queries: Dict[str, str] = raw.get("queries") or {}
         self.websites: List[Dict[str, Any]] = raw.get("websites") or []
+        self.alerts: AlertSettings = _build_alerts(raw.get("alerts") or {})
 
         # Partners are discovered from the database, not listed here.
         discovery = raw.get("partner_discovery") or {}

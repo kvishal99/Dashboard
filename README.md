@@ -323,6 +323,63 @@ Three partner servers (`198.61.136.172/173/174`) timed out on port 80 and are
 commented out rather than left permanently red. Uncomment once you know what
 they should answer on.
 
+Eleven sites are monitored, checked every 30s. Seven of them are the public
+products: `eventseeker.com`, `cityseeker.com`, `mvc`, `concierge`,
+`experience`, `nearmyhotel` and `rtrlocal.com`. Verified on 2026-07-31 —
+everything answers 200 except eventseeker/cityseeker, which sit behind the
+same WAF and answer 403 from outside; `nearmyhotel` and `rtrlocal` redirect to
+a generated path and take 2–4s, hence their 20s timeouts.
+
+### Email alerts when a site goes down
+
+```yaml
+alerts:
+  enabled: true
+  recipients: ["farooque@wcities.com", "ozair@wcities.com",
+               "mayur@wcities.com", "rahul@wcities.com"]
+  from_address: "monitor@wcities.com"
+  failures_before_alert: 2      # checks are 30s apart, so ~1 min down
+  repeat_hours: 6               # reminder while still down; 0 = off
+  smtp:
+    host: "smtp.example.com"
+    port: 587
+    security: starttls          # starttls (587) | ssl (465) | none
+    username: "monitor@wcities.com"
+```
+
+The SMTP password is **not** in `config.yaml` — put it in `.env` as
+`OPS_SMTP_PASSWORD`, like the database password. `OPS_SMTP_HOST`,
+`OPS_SMTP_USER`, `OPS_ALERT_FROM` and `OPS_ALERT_TO` override the file too.
+
+Three mails, and no others:
+
+| When | Subject |
+|---|---|
+| `failures_before_alert` checks fail in a row | `[DOWN] <site> is not responding` |
+| every `repeat_hours` while it stays down | `[STILL DOWN] <site> — down for 2h 10m` |
+| it answers twice in a row again | `[RECOVERED] <site> is back up` |
+
+One failed check is deliberately **not** an outage — a single timeout or WAF
+hiccup would otherwise mail four people at 3am. A flapping site produces one
+DOWN and one RECOVERED per flap, never one mail per check.
+
+Up/down state lives in SQLite (`site_alert_state`), so restarting the dashboard
+cannot re-send a DOWN mail for an outage already reported, and "down since"
+survives the restart. Every attempt — delivered or not — is written to
+`alert_log`, so an alert that failed to send is still on record.
+
+Check the setup without waiting for an outage:
+
+```bash
+curl -X POST http://localhost:5603/api/alerts/test    # mails all recipients
+curl -s     http://localhost:5603/api/alerts          # config + what was sent
+```
+
+Until `smtp.host` and `from_address` are set, `/api/sites` reports
+`alerts.ready: false` with the reason, alerts are logged as "not sent", and the
+health checks carry on regardless — a mail server outage can never take the
+monitoring down.
+
 ## PM2 processes
 
 ```bash
@@ -398,8 +455,10 @@ and `text=` (both 3.7+).
 | `GET /api/partners/{name}/history` | Count history for a partner |
 | `POST /api/partners/{name}/refresh` | Re-count one partner now |
 | `POST /api/counts/refresh` | Re-count every partner now |
-| `GET /api/sites` | Website health rows |
+| `GET /api/sites` | Website health rows + alert status |
 | `POST /api/sites/refresh` | Check sites now (optional `?url=`) |
+| `GET /api/alerts` | Alert config + log of mails sent |
+| `POST /api/alerts/test` | Send a test alert to every recipient |
 | `GET /api/pm2/status` | PM2 state per server |
 | `POST /api/pm2/report` | Agent heartbeat (needs `x-agent-secret`) |
 | `GET /api/jobs` | Scheduler state |
@@ -414,6 +473,7 @@ config.yaml     partners, queries, websites, intervals
 mysql.py        read-only MySQL access + the SELECT-only guard
 counts.py       runs both counts for one partner
 health.py       one website check
+alerts.py       down/recovery emails (state machine + SMTP)
 scheduler.py    the two background loops
 store.py        SQLite history (ops.db)
 check_db.py     pre-flight connectivity/query check
