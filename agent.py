@@ -1,4 +1,4 @@
-j#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Server reporter - runs on each server, posts what it sees to the dashboard.
 
     SERVER_ID=prod-01 DASHBOARD_URL=https://monitor.wcities.com/api/pm2/report \
