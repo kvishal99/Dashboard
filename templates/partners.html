@@ -12,6 +12,12 @@
       <strong>not published</strong> — inserted but never went live, which is
       usually the number worth chasing.
     </p>
+    <p>
+      <strong>% still live</strong> is <em>live ÷ total inserted</em>, measured
+      entirely against our own database — the partner-side feed count plays no
+      part in it. That one percentage decides the <strong>Status</strong> badge;
+      the legend above the table spells out each one.
+    </p>
   </div>
   <div class="actions">
     <input type="search" id="filter" placeholder="Filter partners…" autocomplete="off">
@@ -29,6 +35,9 @@
     <span>Partners <span class="hint" id="row-count"></span></span>
     <span class="hint" id="job-line"></span>
   </h2>
+  <!-- Above the table, not under it: this page runs to 119 rows, so a legend at
+       the bottom is a legend nobody ever sees. -->
+  <div id="legend"></div>
   <div class="table-wrap">
     <table id="partner-table">
       <thead>
@@ -50,7 +59,6 @@
       <tbody id="tbody"></tbody>
     </table>
   </div>
-  <div id="legend"></div>
 </div>
 {% endblock %}
 
@@ -176,7 +184,10 @@ async function refresh() {
   renderTable();
 }
 
-document.getElementById('legend').innerHTML = statusLegend('partners');
+// Listed worst-first, which is also the order the badge logic tests them in:
+// the first rule that matches is the one shown.
+document.getElementById('legend').innerHTML =
+  statusLegend('partners', 'What these statuses mean — the first rule that matches wins');
 document.getElementById('filter').addEventListener('input', renderTable);
 document.getElementById('only-problems').addEventListener('change', renderTable);
 makeSortable('partner-table', sortState, renderTable);

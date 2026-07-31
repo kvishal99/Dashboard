@@ -93,9 +93,9 @@ const STATUS_HELP = {
   partners: [
     ['down', 'QUERY FAILED', 'The last count query against MySQL errored, so every number on this row is stale. The error is shown beneath the badge.'],
     ['unknown', 'NOT CHECKED', 'No counts have been collected for this partner yet. The MySQL sweep runs on the top of every hour.'],
-    ['down', 'NONE LIVE', 'We hold events for this partner but not one is published and still upcoming - everything has either ended or never went live.'],
-    ['warn', 'MOSTLY PAST', 'Fewer than half the events we hold for this partner are live and upcoming. The rest have already ended or were never published. Expected for a partner whose events are seasonal; worth a look otherwise.'],
-    ['up', 'OK', 'At least half of the events we hold for this partner are published and still upcoming.'],
+    ['down', 'NONE LIVE', 'We hold events for this partner but not one is published and still upcoming - everything has either ended or never went live. The ingest is landing, but nothing is reaching the site.'],
+    ['warn', 'MOSTLY PAST', 'The "% still live" column is under 50% - fewer than half the events we hold are published and upcoming. Read it with the two columns to its left, because it covers two different problems: a big "Ended" number is a partner winding down or between seasons, which is usually fine, while a big "Not published" number means events inserted that never went live, which is the one worth chasing.'],
+    ['up', 'OK', 'The "% still live" column is 50% or more - at least half the events we hold are published and still upcoming. It is a floor, not a grade: 51% and 99% both show OK.'],
   ],
   jobs: [
     ['down', 'STALLED', 'Nothing new has been inserted for more than twice the interval its frequency implies. The ingest job is very likely broken.'],
