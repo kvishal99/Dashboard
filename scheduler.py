@@ -113,9 +113,12 @@ class Scheduler:
     def start(self) -> None:
         self._tasks = [
             asyncio.create_task(self._loop("counts", self.run_counts)),
-            asyncio.create_task(self._loop("health", self.run_health)),
             asyncio.create_task(self._prune_loop()),
         ]
+        # Not started at all when site checks are off, so there is no timer that
+        # could fire a request. run_health refuses independently of this.
+        if self.config.health_checks_enabled:
+            self._tasks.append(asyncio.create_task(self._loop("health", self.run_health)))
         # Started only in ssh mode. With cron_source: agent the servers push
         # their crontabs to /api/cron/report and this process never opens an SSH
         # session - which is the point: no stored passwords, no askpass, and
@@ -281,7 +284,19 @@ class Scheduler:
     # ----------------------------------------------------------------- health
 
     async def run_health(self, url: Optional[str] = None) -> Dict[str, Any]:
-        """Check websites. Pass url to check a single site."""
+        """Check websites. Pass url to check a single site.
+
+        Returns without opening a client when health_checks_enabled is false.
+        The guard lives here rather than only at the call sites because this is
+        the single place an outbound request to a monitored site is made.
+        """
+        if not self.config.health_checks_enabled:
+            return {
+                "checked": 0,
+                "disabled": True,
+                "reason": "site checks are disabled (app.health_checks_enabled: false) - "
+                          "no HTTP request was made",
+            }
         job = self.jobs["health"]
         async with job.lock:
             job.running = True

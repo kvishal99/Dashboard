@@ -37,6 +37,11 @@ APP_DEFAULTS = {
     "counts_interval_seconds": 3600,
     "counts_hourly": True,
     "health_interval_seconds": 30,
+    # False stops the dashboard making ANY outbound HTTP request to a monitored
+    # site - the scheduled loop never starts and the manual refresh refuses. The
+    # sites tab then shows the last stored result and pm2 becomes the live
+    # signal. Set when the sites must not be hit or crawled from here at all.
+    "health_checks_enabled": True,
     # "agent" - servers push their own crontabs to /api/cron/report (no SSH).
     # "ssh"   - the dashboard logs into each server and reads them itself.
     "cron_source": "agent",
@@ -137,6 +142,10 @@ class Config:
         # False = plain timer on counts_interval_seconds.
         self.counts_hourly: bool = bool(app["counts_hourly"])
         self.health_interval: int = int(app["health_interval_seconds"])
+        # The one switch that decides whether this process ever talks to a
+        # monitored site. Checked in run_health itself, not only where the loop
+        # is started, so no code path - manual refresh included - can get out.
+        self.health_checks_enabled: bool = bool(app["health_checks_enabled"])
         self.cron_interval: int = int(app["cron_interval_seconds"])
         # Only "ssh" makes the dashboard log into anything. Anything else means
         # the agents push, and no SSH job is started at all.

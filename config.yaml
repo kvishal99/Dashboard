@@ -28,6 +28,13 @@ app:
   # Websites hit no database, so they are checked every 30s. The sites page
   # polls its own SQLite rows every 10s, which costs MySQL nothing.
   health_interval_seconds: 30
+  # Turned off on 2026-07-31: this dashboard must not hit or crawl the monitored
+  # sites at all. Nothing here requests those URLs while this is false - the
+  # scheduled loop is never started and "Check all now" refuses. The sites tab
+  # keeps showing the last stored result, and the live signal is the Processes
+  # tab, which comes from pm2 on each server and needs no request to the site.
+  # Set back to true to resume polling; health_interval_seconds still applies.
+  health_checks_enabled: false
   # Where the Cron tab's data comes from.
   #   agent - each server pushes its own `crontab -l` to /api/cron/report via
   #           agent.py. The dashboard opens no SSH sessions at all, stores no

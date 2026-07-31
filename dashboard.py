@@ -353,6 +353,9 @@ async def api_feed_history(partner_name: str, limit: int = Query(60, ge=1, le=50
 async def api_sites():
     return {
         "sites": build_site_rows(),
+        # False means nothing here ever requests these URLs; the rows are the
+        # last stored result and Processes is the live signal.
+        "checks_enabled": config.health_checks_enabled,
         "jobs": scheduler.status(),
         # So a misconfigured mail setup is visible on the page itself rather
         # than only discovered the day an outage goes unreported.

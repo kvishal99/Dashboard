@@ -17,6 +17,8 @@
   </div>
 </div>
 
+<div id="checks-banner"></div>
+
 <div class="stat-row" id="stats"></div>
 
 <div class="panel">
@@ -89,6 +91,23 @@ async function refresh() {
   const data = await getJSON('/api/sites');
   renderStats(data.sites);
   document.getElementById('job-line').innerHTML = jobLine(data.jobs.health);
+
+  // With checks off nothing on this page is live. Say so once, loudly, and take
+  // away the button rather than leave one that silently does nothing.
+  const off = data.checks_enabled === false;
+  const btn = document.getElementById('refresh-sites');
+  btn.disabled = off;
+  btn.title = off ? 'Site checks are disabled — no request will be made' : '';
+  document.getElementById('checks-banner').innerHTML = off
+    ? `<div class="banner warn">
+         <strong>Site checks are off — these rows are frozen.</strong>
+         This dashboard makes no request to any monitored site
+         (<span class="mono">app.health_checks_enabled: false</span>), so the
+         statuses, codes and timings below are the last values recorded before
+         it was switched off. For live status use the
+         <a href="/processes">Processes</a> tab, which reads pm2 on each server.
+       </div>`
+    : '';
 
   if (!data.sites.length) {
     document.getElementById('tbody').innerHTML =
