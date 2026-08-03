@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Settings · Ops{% endblock %}
+{% block heading %}Settings{% endblock %}
+
+{% block content %}
+{#
+  Read-only, deliberately.
+
+  config.yaml and .env are the record of how this instance is configured. A
+  settings page that could write them would put the running process and the file
+  it was loaded from permanently out of step - and the file is what survives a
+  restart, gets committed, and gets copied to the next server. So this page
+  shows what is in force and where to change it, and changes nothing itself.
+#}
+
+<div class="page-intro">
+  <div>
+    <p>
+      What this instance is configured to do, and where each setting comes from.
+      This page is read-only: <span class="mono">config.yaml</span> and
+      <span class="mono">.env</span> are the record, and a page that could
+      overwrite them would leave the running process disagreeing with the file.
+    </p>
+  </div>
+</div>
+
+<div id="body"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function rows(pairs) {
+  return `<dl class="detail-grid">${pairs.map(([k, v]) => `
+    <div><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
+}
+
+const yes = (b) => (b ? badge('ok', 'ON') : badge('idle', 'OFF'));
+
+async function load() {
+  const s = await getJSON('/api/settings');
+  const jobs = s.jobs || {};
+
+  document.getElementById('body').innerHTML = `
+    ${!s.auth.enabled ? `<div class="notice bad" style="margin-bottom:var(--s4)"><div class="body">
+      <strong>This dashboard is not password protected.</strong>
+      Set <span class="mono">OPS_AUTH_PASSWORD</span> in <span class="mono">.env</span>
+      before putting it anywhere reachable. Authentication turns on as soon as a
+      password exists — there is no separate switch.</div></div>` : ''}
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Database</h2>
+          <span class="hint">read-only — this dashboard cannot write to MySQL</span></div>
+        <div class="panel-body">
+          ${rows([
+            ['Host', `<span class="mono">${esc(s.database.host)}:${s.database.port}</span>`],
+            ['Schema', `<span class="mono">${esc(s.database.database)}</span>`],
+            ['User', `<span class="mono">${esc(s.database.user)}</span>`],
+            ['Password', s.database.password_set ? badge('ok', 'SET') : badge('bad', 'NOT SET')],
+            ['Answering server', '<span id="db-server" class="mono">checking…</span>'],
+          ])}
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Scheduled work</h2>
+          <span class="hint">${s.app.scheduler_enabled ? 'running' : 'disabled by OPS_DISABLE_SCHEDULER'}</span></div>
+        <div class="panel-body">
+          ${rows([
+            ['Partner counts', `${s.app.counts_hourly
+              ? 'on the top of every hour' : `every ${s.app.counts_interval_seconds}s`}
+              <div class="sub">${jobLine(jobs.counts)}</div>`],
+            ['Website checks', `${yes(s.app.health_checks_enabled)}
+              <span class="muted">every ${s.app.health_interval_seconds}s</span>
+              <div class="sub">${jobLine(jobs.health)}</div>`],
+            ['Crontab collection', `<span class="chip">${esc(s.app.cron_source)}</span>
+              <div class="sub">${s.app.cron_source === 'agent'
+                ? 'servers push their own crontabs — the dashboard opens no SSH sessions'
+                : 'the dashboard logs into each host'}</div>`],
+            ['PM2 stale after', `${s.app.pm2_stale_seconds}s`],
+            ['History kept', `${s.app.history_keep_days} days`],
+          ])}
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Spreadsheet comparison</h2></div>
+        <div class="panel-body">
+          ${rows([
+            ['Record-level query', s.queries.partner_records
+              ? badge('ok', 'CONFIGURED')
+              : `${badge('bad', 'NOT SET')} <div class="sub">Set
+                 <span class="mono">queries.partner_records</span> in config.yaml
+                 to enable matching/missing/extra.</div>`],
+            ['Largest upload', `${s.app.max_upload_mb} MB`],
+            ['Comparison row limit', `${fmtNum(s.app.max_compare_rows)}
+              <div class="sub">A partner with more records produces no comparison rather
+              than a partial one — unread rows would be reported as missing.</div>`],
+            ['Uploads stored in', `<span class="mono">${esc(s.paths.uploads)}</span>`],
+          ])}
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Partners</h2>
+          <span class="hint">discovered from the database, not configured</span></div>
+        <div class="panel-body">
+          ${rows([
+            ['Discovered', `${fmtNum(s.partners.discovered)} with counts`],
+            ['Minimum live records', s.partners.min_live_events],
+            ['Extra metadata', `${fmtNum(s.partners.with_meta)} partners have server/frequency/path
+              from the status sheet`],
+            ['Excluded', s.partners.excluded.length
+              ? s.partners.excluded.map((e) => `<span class="chip">${esc(e)}</span>`).join(' ')
+              : '<span class="muted">none</span>'],
+            ['Websites monitored', fmtNum(s.websites)],
+          ])}
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Email alerts</h2>
+          <span class="hint">${s.alerts.ready ? 'ready' : 'not configured'}</span></div>
+        <div class="panel-body">
+          ${rows([
+            ['Status', s.alerts.ready ? badge('ok', 'READY')
+              : `${badge('warn', 'NOT READY')} <div class="sub">${esc(s.alerts.reason || 'SMTP host and from address are required')}</div>`],
+            ['Recipients', (s.alerts.recipients || []).length
+              ? (s.alerts.recipients || []).map((r) => `<span class="chip">${esc(r)}</span>`).join(' ')
+              : '<span class="muted">none</span>'],
+          ])}
+          <div style="margin-top:var(--s3)">
+            <button id="test-alert" ${s.alerts.ready ? '' : 'disabled'}>Send a test alert</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Access</h2></div>
+        <div class="panel-body">
+          ${rows([
+            ['Browser login', `${yes(s.auth.enabled)} ${s.auth.enabled
+              ? `<span class="muted">as <span class="mono">${esc(s.auth.user)}</span></span>` : ''}`],
+            ['Covers', 'every page, every API route and /static — it is middleware, so a route added later cannot forget it'],
+            ['Exempt', 'the three agent push endpoints, which authenticate with x-agent-secret instead'],
+          ])}
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Where things live</h2>
+          <span class="hint">edit these files, then restart</span></div>
+        <div class="panel-body">
+          ${rows(Object.entries(s.paths).map(([k, v]) =>
+            [k.charAt(0).toUpperCase() + k.slice(1), `<span class="mono">${esc(v)}</span>`]))}
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>The queries behind the numbers</h2>
+          <span class="hint">from config.yaml — inspectable without opening the server</span></div>
+        <div class="panel-body" style="display:grid;gap:var(--s3)">
+          ${Object.entries(s.queries).map(([name, sql]) => `<div>
+            <div class="tile-label">${esc(name)}</div>
+            <pre class="log-line" style="margin:4px 0 0;padding:var(--s2) var(--s3);
+                 background:var(--surface-2);border:1px solid var(--border);
+                 border-radius:var(--radius)">${esc(sql || 'not set')}</pre>
+          </div>`).join('')}
+        </div>
+      </div>
+    </div>`;
+
+  wireAction('test-alert', '/api/alerts/test', null, { busy: 'Sending…' });
+
+  try {
+    const db = await getJSON('/api/db/identity');
+    document.getElementById('db-server').innerHTML = db.ok
+      ? `${esc(db.hostname)} <span class="muted">· ${esc(db.version || '')}</span>`
+      : `<span style="color:var(--bad)">unreachable — ${esc(db.error || '')}</span>`;
+  } catch (_) {
+    document.getElementById('db-server').textContent = 'unknown';
+  }
+}
+
+load();
+</script>
+{% endblock %}

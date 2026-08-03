@@ -55,6 +55,27 @@ app:
   # Only used by the per-partner "Refresh" button; the scheduled run is one query.
   max_concurrent_queries: 4
 
+  # ---- Spreadsheet comparison ---------------------------------------------
+  # Where uploaded partner sheets are kept. The originals are stored so the
+  # source of a comparison can be downloaded back - a disputed "412 missing"
+  # cannot be settled without the file it came from.
+  upload_dir: "uploads"
+  # Largest sheet accepted, in megabytes. Rejected at the door rather than read
+  # into memory first.
+  max_upload_mb: 25
+  # Most database records that may be pulled for one comparison. A partner with
+  # more than this produces NO comparison rather than a partial one: unread rows
+  # would be reported as missing, which is a wrong answer that looks like a real
+  # finding. Raise it if you need to compare a very large partner, remembering
+  # this is a row-by-row read of MySQL, not a COUNT.
+  max_compare_rows: 100000
+
+  # ---- Logs ----------------------------------------------------------------
+  # Written by the app itself so the Logs page has something to read even when
+  # the process was not started under systemd. Relative paths sit beside the code.
+  log_file: "dashboard.log"
+  log_level: "INFO"
+
 
 ####################################################################
 # MySQL connection.
@@ -111,6 +132,24 @@ queries:
   db_past: "SELECT COUNT(id) FROM jos_eventlist_events WHERE published = '1' AND enddates < CURRENT_DATE AND partner = %s"
   # Unpublished is derived as feed_total - db_future - db_past, so it costs no
   # extra query. It's the interesting one: rows that inserted but never went live.
+
+  # ---- Spreadsheet comparison ---------------------------------------------
+  # The ONLY query that returns individual records rather than a count, and the
+  # only way matching / missing / extra can be answered honestly: two sides can
+  # hold the same number of rows and still not hold the same rows.
+  #
+  # Column ORDER is part of the contract - compare.fetch_db_rows unpacks it as
+  # id, title, start, end, url, published. Change the columns if your schema
+  # differs, but keep the six positions.
+  #
+  # partner_url is included because it is what a partner sheet can actually be
+  # tied to: it carries the product URL (and usually the product id in its last
+  # path segment), while our `id` means nothing on their side.
+  #
+  # The second %s is the row cap, bound as a parameter. It is deliberately asked
+  # for as cap+1 so overflow is detected rather than silently truncating into a
+  # comparison that would report every unread row as missing.
+  partner_records: "SELECT id, title, dates, enddates, partner_url, published FROM jos_eventlist_events WHERE partner = %s ORDER BY id LIMIT %s"
 
 
 ####################################################################

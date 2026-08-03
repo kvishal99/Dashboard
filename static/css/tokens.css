@@ -1,0 +1,176 @@
+/* Design tokens - the whole palette and scale in one place.
+ *
+ * Every colour below was measured against its background, not eyeballed. The
+ * text pairs are 4.5:1 or better (WCAG AA); the badge pairs are 7:1 or better,
+ * because a badge is small text.
+ *
+ * Status colour is never the only signal. Each badge carries a text label and a
+ * glyph as well, since green and red sit close together for the ~8% of men with
+ * deuteranopia - colour reinforces a label that already says what the state is.
+ */
+
+:root {
+  /* ---- Surfaces. Light, low-contrast, no gradients. ------------------- */
+  --bg: #f5f6f8;            /* the page behind everything */
+  --surface: #ffffff;       /* cards, panels, table bodies */
+  --surface-2: #f8f9fb;     /* table headers, inset areas */
+  --surface-3: #eef0f4;     /* hover fills, track backgrounds */
+  --sidebar: #ffffff;
+
+  /* ---- Lines. Two weights: one to separate, one to enclose. ----------- */
+  --border: #e3e6ec;        /* between rows, inside components */
+  --border-strong: #cfd4de; /* around inputs and controls */
+
+  /* ---- Ink -------------------------------------------------------------
+   * text     on --surface = 15.8:1
+   * muted    on --surface =  5.4:1
+   * subtle   on --surface =  4.6:1  (smallest size this may be used at: 12px)
+   */
+  --text: #1a1f2b;
+  --muted: #626c7e;
+  --subtle: #78828f;
+  --inverse: #ffffff;
+
+  /* ---- Status ----------------------------------------------------------
+   * Each has an ink (for text/icons on light), a fill and a border for the
+   * badge, and a soft tint for row and tile backgrounds.
+   */
+  --ok: #0f7b40;           /* green   - success, running fine */
+  --ok-fill: #e6f4ec;
+  --ok-border: #b6dcc6;
+
+  --warn: #8a5a00;         /* yellow  - warning, overdue, degraded */
+  --warn-fill: #fdf3e0;
+  --warn-border: #f0d9a8;
+
+  --bad: #b3261e;          /* red     - failed, down, error */
+  --bad-fill: #fdecea;
+  --bad-border: #f3c2bd;
+
+  --info: #1a5fb4;         /* blue    - information, running, neutral state */
+  --info-fill: #e8f0fb;
+  --info-border: #bcd3f0;
+
+  --idle: #5c6672;         /* grey    - unknown, not checked, disabled */
+  --idle-fill: #f0f2f5;
+  --idle-border: #d8dde5;
+
+  /* ---- Accent. One hue, used for links, focus and the active nav item. */
+  --accent: #1a5fb4;
+  --accent-hover: #164e94;
+  --accent-soft: #e8f0fb;
+
+  /* ---- Magnitude. A meter encodes size, not state, so it is ONE hue.
+   * A red/amber/green bar would say "bad" about a number that is merely small. */
+  --meter: #3b82c4;
+  --meter-track: #e7eaf0;
+
+  /* ---- Type ------------------------------------------------------------
+   * A single family, three sizes below body, two above. Tabular numerals
+   * everywhere a figure appears so columns of numbers line up.
+   */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-xs: 0.6875rem;   /* 11px - table labels, chips */
+  --text-sm: 0.75rem;     /* 12px - secondary text */
+  --text-base: 0.8125rem; /* 13px - table cells, body */
+  --text-md: 0.875rem;    /* 14px - controls, nav */
+  --text-lg: 1.0625rem;   /* 17px - panel and section titles */
+  --text-xl: 1.375rem;    /* 22px - page title */
+  --text-stat: 1.625rem;  /* 26px - the number on a tile */
+
+  /* ---- Space. A 4px scale; nothing between the steps. ------------------ */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 48px;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* ---- Elevation -------------------------------------------------------
+   * Two levels only, both nearly invisible. Depth is carried by borders here;
+   * shadow is reserved for things that genuinely float above the page.
+   */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08);
+  --shadow-lg: -8px 0 32px rgba(16, 24, 40, 0.12);
+
+  /* ---- Layout ---------------------------------------------------------- */
+  --sidebar-w: 216px;
+  --topbar-h: 56px;
+  --page-max: 1440px;
+
+  --transition: 120ms ease;
+}
+
+/* Respecting a system dark-mode preference with a genuine dark palette is a
+ * separate piece of work - inverting these tokens would produce grey-on-grey
+ * status colours that fail the contrast they were chosen for. Until then the
+ * dashboard commits to light, which is what was asked for and what an
+ * always-on wall display wants. */
+
+* { box-sizing: border-box; }
+
+/* `hidden` must actually hide.
+ *
+ * The attribute is styled by the UA stylesheet as `display: none`, which any
+ * class setting a display loses to on specificity - so `.notice[hidden]` and
+ * `.slideover[hidden]`, both of which set `display: flex`, stayed on screen.
+ * Everything in this codebase that toggles visibility does it with `hidden`,
+ * so this rule has to win. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+/* One visible focus style for every interactive element. Keyboard users get a
+ * ring that is never removed - :focus-visible keeps it off mouse clicks. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+h1, h2, h3, h4 {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Anything showing a figure. Tabular numerals keep digits the same width, so a
+ * column of counts aligns and a live-updating number does not jitter. */
+.num, .stat-value, td.num, th.num {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

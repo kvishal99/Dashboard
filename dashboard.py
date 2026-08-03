@@ -1,22 +1,38 @@
-"""Ops Dashboard - partner event counts, website health and PM2 processes.
+"""Ops Dashboard - partner ingestion monitoring, spreadsheet comparison,
+website health and PM2 processes.
 
 Run with:  ./venv/bin/python dashboard.py
+
+The shape of the API mirrors the shape of the UI, and both follow one rule: the
+main dashboard shows a summary and nothing else. `/api/overview` returns one
+small card per partner - name, status, total, last updated, issue count - and
+never the detail behind them. Everything heavier (count history, the comparison
+row lists, the crontab inventory) sits behind a per-partner route that is only
+called when someone actually opens that partner.
+
+That is why the overview stays fast with 112 partners, and why adding a 113th
+costs the front page nothing.
 """
 import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import applog
+import compare as compare_mod
 import cron_parse
+import exports
+import issues as issues_mod
 import jobs as jobs_mod
 import mysql
+import sheets
 from auth import BasicAuthMiddleware
 from config import BASE_DIR, load_config
 from scheduler import Scheduler
@@ -36,9 +52,38 @@ PM2_STORE: Dict[str, Dict[str, Any]] = {}
 # you don't want a wall of failed collections.
 SCHEDULER_ENABLED = os.environ.get("OPS_DISABLE_SCHEDULER", "") not in ("1", "true", "yes")
 
+# The sections in the sidebar, in order. Declared here rather than in the
+# template so every page agrees on what exists and what is current, and so the
+# Knowledge Base can be switched on later by flipping `enabled` - no template,
+# route or stylesheet has to change for it to appear.
+NAV: List[Dict[str, Any]] = [
+    {"key": "overview", "label": "Dashboard", "href": "/", "icon": "grid"},
+    {"key": "partners", "label": "Partners", "href": "/partners", "icon": "users"},
+    {"key": "processes", "label": "Processes", "href": "/processes", "icon": "activity"},
+    {"key": "issues", "label": "Issues", "href": "/issues", "icon": "alert", "badge": "issues"},
+    {"key": "logs", "label": "Logs", "href": "/logs", "icon": "list"},
+    {"key": "downloads", "label": "Downloads", "href": "/downloads", "icon": "download"},
+    {"key": "reports", "label": "Reports", "href": "/reports", "icon": "chart"},
+    {"key": "settings", "label": "Settings", "href": "/settings", "icon": "cog"},
+    # Ships disabled: the nav slot, the active-state handling and the sidebar
+    # spacing all exist now, so building the module later is a new template and
+    # nothing else. Designing the shell around seven items and adding an eighth
+    # afterwards is what forces a redesign.
+    {"key": "kb", "label": "Knowledge Base", "href": "/knowledge-base",
+     "icon": "book", "enabled": False, "note": "Coming soon"},
+]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Timestamp every log line and mirror it to the file the Logs page reads.
+    #
+    # This has to happen HERE rather than at import time: uvicorn installs its
+    # own logging configuration when the server starts, which is after this
+    # module is imported and would replace any formatter set earlier. Startup
+    # runs after that, so this is the first point at which the format sticks.
+    applog.configure(config.log_file, config.log_level)
+
     if SCHEDULER_ENABLED:
         scheduler.start()
     yield
@@ -61,6 +106,13 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 
+def page(request: Request, template: str, active: str, **context: Any) -> Any:
+    """Render a page with the shell context every template needs."""
+    return templates.TemplateResponse(
+        request, template, {"active": active, "nav": NAV, **context}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
@@ -72,16 +124,23 @@ def _pct(part: Optional[int], whole: Optional[int]) -> Optional[float]:
     return round(100.0 * part / whole, 2)
 
 
+def _iso(ts: Optional[float]) -> Optional[str]:
+    if not ts:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
 def known_partners() -> List[str]:
     """Partners we have counts for - discovered from the database, not configured."""
     return sorted(store.latest_counts().keys(), key=str.lower)
 
 
-def build_partner_rows() -> List[Dict[str, Any]]:
+def build_partner_rows(with_comparison: bool = True) -> List[Dict[str, Any]]:
     """Discovered partners joined with their latest counts, plus deltas."""
     latest = store.latest_counts()
     previous = store.previous_counts()
     feeds = store.latest_feed_counts()
+    comparisons = store.latest_comparisons() if with_comparison else {}
 
     rows = []
     for name in sorted(latest.keys(), key=str.lower):
@@ -156,10 +215,81 @@ def build_partner_rows() -> List[Dict[str, Any]]:
                 "ok": bool(cur["ok"]) if cur else None,
                 "error": cur["error"] if cur else None,
                 "collected_at": cur["collected_at"] if cur else None,
+                "collected_at_iso": _iso(cur["collected_at"] if cur else None),
                 "duration_ms": cur["duration_ms"] if cur else None,
+                # The record-level spreadsheet diff, when one has been run.
+                "comparison": comparisons.get(name),
             }
         )
     return rows
+
+
+# The cron cross-reference reads every collected crontab line and is the same
+# for every partner, so it is computed once per call rather than per row. Cached
+# briefly because the overview polls every few seconds while crontabs arrive
+# every six hours - re-deriving it on each poll is pure waste.
+_CRON_CACHE: Dict[str, Any] = {"at": 0.0, "by_partner": {}, "servers": set()}
+_CRON_TTL = 30.0
+
+
+def cron_index() -> Tuple[Dict[str, List[Dict[str, Any]]], set]:
+    now = time.time()
+    if now - _CRON_CACHE["at"] > _CRON_TTL:
+        by_partner: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in store.cron_jobs():
+            if entry["partner"]:
+                by_partner.setdefault(entry["partner"].lower(), []).append(entry)
+        _CRON_CACHE.update({
+            "at": now,
+            "by_partner": by_partner,
+            "servers": {s["server"] for s in store.cron_servers()},
+        })
+    return _CRON_CACHE["by_partner"], _CRON_CACHE["servers"]
+
+
+def annotate_cron(rows: List[Dict[str, Any]]) -> None:
+    """Attach cron entry status to each partner row, in place.
+
+    "Stopped inserting" alone means the job is broken. "Stopped inserting AND
+    has no cron entry" means it was removed - a different fix - which neither
+    fact establishes on its own.
+    """
+    by_partner, collected_servers = cron_index()
+    for row in rows:
+        entries = by_partner.get(row["name"].lower(), [])
+        active = [e for e in entries if not e["disabled"]]
+        if active:
+            status = "found"
+        elif entries:
+            # Present but commented out - a deliberate disable, worth naming
+            # separately from a cron that isn't there at all.
+            status = "disabled"
+        elif not collected_servers or not row.get("server"):
+            status = "unknown"
+        elif row["server"] not in collected_servers:
+            # We never looked at that box, so absence proves nothing.
+            status = "unknown"
+        else:
+            status = "missing"
+        row["cron_status"] = status
+        row["cron_count"] = len(entries)
+        row["cron_schedule"] = (active or entries or [{}])[0].get("schedule_human")
+
+
+def partner_status(row: Dict[str, Any]) -> str:
+    """The one word the card shows: running | success | warning | failed.
+
+    Derived from the issues on the row rather than from a second set of rules,
+    so a card can never read "Success" beside a red issue count.
+    """
+    if scheduler.jobs["counts"].running and row.get("collected_at") is None:
+        return "running"
+    found = row.get("issues") or []
+    if any(i["severity"] == issues_mod.CRITICAL for i in found):
+        return "failed"
+    if any(i["severity"] == issues_mod.WARNING for i in found):
+        return "warning"
+    return "success"
 
 
 def build_site_rows() -> List[Dict[str, Any]]:
@@ -179,6 +309,7 @@ def build_site_rows() -> List[Dict[str, Any]]:
                 "latency_ms": check["latency_ms"] if check else None,
                 "error": check["error"] if check else None,
                 "checked_at": check["checked_at"] if check else None,
+                "checked_at_iso": _iso(check["checked_at"] if check else None),
                 "uptime_24h": uptime["uptime_pct"],
                 "checks_24h": uptime["checks"],
                 "avg_latency_24h": uptime["avg_latency_ms"],
@@ -207,6 +338,32 @@ def build_server_rows() -> List[Dict[str, Any]]:
         )
     servers.sort(key=lambda s: (not s["stale"] and s["errored_count"] == 0, s["server_id"]))
     return servers
+
+
+def full_state() -> Dict[str, Any]:
+    """Partners, sites, servers and every issue across them.
+
+    One function because the issue list has to be derived from exactly the rows
+    the pages display - computing them separately is how a tile and a table end
+    up disagreeing.
+    """
+    partners = build_partner_rows()
+    annotate_cron(partners)
+    sites = build_site_rows()
+    servers = build_server_rows()
+
+    found = issues_mod.collect(partners, sites, servers)
+
+    by_subject: Dict[str, List[Dict[str, Any]]] = {}
+    for issue in found:
+        if issue["scope"] == "partner":
+            by_subject.setdefault(issue["subject"], []).append(issue)
+    for row in partners:
+        row["issues"] = by_subject.get(row["name"], [])
+        row["issue_count"] = len(row["issues"])
+        row["status"] = partner_status(row)
+
+    return {"partners": partners, "sites": sites, "servers": servers, "issues": found}
 
 
 def build_summary(partners: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -238,14 +395,38 @@ def build_summary(partners: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# The fields a partner card needs, and nothing else. Sending the full row would
+# be roughly six times the payload for data the card cannot display.
+CARD_FIELDS = (
+    "name", "status", "issue_count", "feed_total", "db_future", "live_pct",
+    "collected_at", "last_created", "job_state", "server", "frequency",
+)
+
+
+def to_card(row: Dict[str, Any]) -> Dict[str, Any]:
+    card = {key: row.get(key) for key in CARD_FIELDS}
+    comparison = row.get("comparison") or {}
+    # Two numbers, not the row lists behind them - those load when the partner
+    # is opened.
+    card["missing"] = comparison.get("missing")
+    card["extra"] = comparison.get("extra")
+    card["worst_issue"] = row["issues"][0]["title"] if row.get("issues") else None
+    return card
+
+
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
 
 
 @app.get("/")
+async def page_overview(request: Request):
+    return page(request, "overview.html", "overview")
+
+
+@app.get("/partners")
 async def page_partners(request: Request):
-    return templates.TemplateResponse(request, "partners.html", {"active": "partners"})
+    return page(request, "partners.html", "partners")
 
 
 @app.get("/partners/{partner_name}")
@@ -253,29 +434,77 @@ async def page_partner_detail(request: Request, partner_name: str):
     if partner_name not in store.latest_counts():
         raise HTTPException(status_code=404, detail=f"unknown partner: {partner_name}")
     partner = {"name": partner_name, **config.meta_for(partner_name)}
-    return templates.TemplateResponse(
-        request, "partner_detail.html", {"active": "partners", "partner": partner}
-    )
-
-
-@app.get("/sites")
-async def page_sites(request: Request):
-    return templates.TemplateResponse(request, "sites.html", {"active": "sites"})
-
-
-@app.get("/jobs")
-async def page_jobs(request: Request):
-    return templates.TemplateResponse(request, "jobs.html", {"active": "jobs"})
-
-
-@app.get("/cron")
-async def page_cron(request: Request):
-    return templates.TemplateResponse(request, "cron.html", {"active": "cron"})
+    return page(request, "partner_detail.html", "partners", partner=partner)
 
 
 @app.get("/processes")
 async def page_processes(request: Request):
-    return templates.TemplateResponse(request, "processes.html", {"active": "processes"})
+    return page(request, "processes.html", "processes")
+
+
+@app.get("/issues")
+async def page_issues(request: Request):
+    return page(request, "issues.html", "issues")
+
+
+@app.get("/logs")
+async def page_logs(request: Request):
+    return page(request, "logs.html", "logs")
+
+
+@app.get("/downloads")
+async def page_downloads(request: Request):
+    return page(request, "downloads.html", "downloads")
+
+
+@app.get("/reports")
+async def page_reports(request: Request):
+    return page(request, "reports.html", "reports")
+
+
+@app.get("/settings")
+async def page_settings(request: Request):
+    return page(request, "settings.html", "settings")
+
+
+# ---------------------------------------------------------------------------
+# API - the overview
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/overview")
+async def api_overview():
+    """Everything the main dashboard shows, and nothing more.
+
+    Deliberately summary-only: one small card per partner plus the headline
+    counts. No history, no comparison rows, no crontab lines - those are fetched
+    when a partner is opened.
+    """
+    state = full_state()
+    partners = state["partners"]
+    summary = build_summary(partners)
+    issue_summary = issues_mod.summarise(state["issues"])
+
+    by_status: Dict[str, int] = {}
+    for row in partners:
+        by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+
+    compared = [p for p in partners if p.get("comparison")]
+    return {
+        "cards": [to_card(row) for row in partners],
+        "summary": {
+            **summary,
+            "issues": issue_summary,
+            "by_status": by_status,
+            "healthy": by_status.get("success", 0),
+            # The comparison headline, across every partner that has one.
+            "compared_partners": len(compared),
+            "total_missing": sum(p["comparison"].get("missing") or 0 for p in compared),
+            "total_extra": sum(p["comparison"].get("extra") or 0 for p in compared),
+        },
+        "jobs": scheduler.status(),
+        "now": time.time(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +514,12 @@ async def page_processes(request: Request):
 
 @app.get("/api/partners")
 async def api_partners():
-    rows = build_partner_rows()
+    state = full_state()
+    rows = state["partners"]
     return {
         "partners": rows,
         "summary": build_summary(rows),
+        "issues": issues_mod.summarise(state["issues"]),
         "jobs": scheduler.status(),
         "now": time.time(),
     }
@@ -296,8 +527,10 @@ async def api_partners():
 
 @app.get("/api/partners/{partner_name}")
 async def api_partner(partner_name: str):
-    for row in build_partner_rows():
+    """One partner, in full. Called only when a partner is actually opened."""
+    for row in full_state()["partners"]:
         if row["name"] == partner_name:
+            row["uploads"] = store.uploads(partner_name, limit=20)
             return {"partner": row, "jobs": scheduler.status(), "now": time.time()}
     raise HTTPException(status_code=404, detail=f"unknown partner: {partner_name}")
 
@@ -306,7 +539,15 @@ async def api_partner(partner_name: str):
 async def api_partner_history(partner_name: str, limit: int = Query(60, ge=1, le=500)):
     if partner_name not in store.latest_counts():
         raise HTTPException(status_code=404, detail=f"unknown partner: {partner_name}")
-    return {"history": store.counts_history(partner_name, limit)}
+    rows = store.counts_history(partner_name, limit)
+    for row in rows:
+        row["collected_at_iso"] = _iso(row["collected_at"])
+        row["db_unpublished"] = (
+            max(row["feed_total"] - row["db_future"] - row["db_past"], 0)
+            if None not in (row["feed_total"], row["db_future"], row["db_past"])
+            else None
+        )
+    return {"history": rows}
 
 
 @app.post("/api/partners/{partner_name}/refresh")
@@ -354,6 +595,277 @@ async def api_report_feed_count(
 @app.get("/api/partners/{partner_name}/feed-history")
 async def api_feed_history(partner_name: str, limit: int = Query(60, ge=1, le=500)):
     return {"history": store.feed_history(partner_name, limit)}
+
+
+# ---------------------------------------------------------------------------
+# API - spreadsheet comparison
+# ---------------------------------------------------------------------------
+
+
+def _require_partner(partner_name: str) -> None:
+    if partner_name not in store.latest_counts():
+        raise HTTPException(status_code=404, detail=f"unknown partner: {partner_name}")
+
+
+@app.post("/api/partners/{partner_name}/upload")
+async def api_upload_sheet(
+    partner_name: str,
+    request: Request,
+    x_filename: str = Header("sheet.csv"),
+):
+    """Accept a partner spreadsheet as the raw request body.
+
+    The file is sent as the body with the name in a header, rather than as a
+    multipart form, because multipart would pull in python-multipart - a seventh
+    dependency for a single upload button. `fetch(url, {body: file})` does this
+    natively in the browser, so nothing is lost on the client side.
+    """
+    _require_partner(partner_name)
+
+    declared = int(request.headers.get("content-length") or 0)
+    if declared > config.max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file is larger than the {config.max_upload_bytes // 1024 // 1024} MB limit",
+        )
+
+    data = await request.body()
+    if len(data) > config.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="file is over the upload limit")
+
+    try:
+        parsed = sheets.parse(x_filename, data)
+    except sheets.SheetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if not parsed.matchable:
+        raise HTTPException(
+            status_code=400,
+            detail="no usable column found - the sheet needs a tour/product name, "
+                   "an id, or a URL column to compare against the database. "
+                   f"Columns seen: {', '.join(parsed.headers[:12])}",
+        )
+
+    # Keep the original so the source of a comparison stays retrievable.
+    os.makedirs(config.upload_dir, exist_ok=True)
+    stored_name = exports.safe_filename(partner_name, str(int(time.time())), x_filename)
+    stored_path = os.path.join(config.upload_dir, stored_name)
+    with open(stored_path, "wb") as fh:
+        fh.write(data)
+
+    rows = parsed.normalised()
+    upload_id = store.record_upload(
+        partner=partner_name,
+        filename=x_filename,
+        stored_path=stored_path,
+        size_bytes=len(data),
+        rows=rows,
+        headers=parsed.headers,
+        mapping=parsed.mapping,
+    )
+    return {
+        "status": "ok",
+        "upload_id": upload_id,
+        "rows": len(rows),
+        "headers": parsed.headers,
+        "mapping": parsed.mapping,
+        # Named so the UI can say which column became which field - a wrong
+        # guess here is the difference between 0 missing and 85,000.
+        "dated": sum(1 for r in rows if r["start_date"]),
+    }
+
+
+@app.post("/api/partners/{partner_name}/compare")
+async def api_run_comparison(
+    partner_name: str, upload_id: Optional[int] = Query(None)
+):
+    """Diff the partner's spreadsheet against the database, and store the result."""
+    _require_partner(partner_name)
+
+    if not config.queries.get("partner_records"):
+        raise HTTPException(
+            status_code=501,
+            detail="queries.partner_records is not set in config.yaml, so "
+                   "record-level comparison is unavailable. See the README.",
+        )
+
+    upload = store.upload(upload_id) if upload_id else store.latest_upload(partner_name)
+    if not upload:
+        raise HTTPException(
+            status_code=400,
+            detail=f"no spreadsheet has been uploaded for {partner_name} yet",
+        )
+    if upload["partner"] != partner_name:
+        raise HTTPException(status_code=400, detail="that upload belongs to another partner")
+
+    sheet_rows = store.sheet_rows(upload["id"])
+    # MySQL is blocking, and this reads rows rather than counting them, so it
+    # goes to a thread - a large partner would otherwise stall every other
+    # request for the duration.
+    result = await asyncio.to_thread(
+        compare_mod.compare,
+        partner_name,
+        sheet_rows,
+        config.database,
+        config.queries["partner_records"],
+        config.max_compare_rows,
+    )
+    comparison_id = store.record_comparison(partner_name, upload["id"], result)
+
+    return {
+        **{k: v for k, v in result.items() if k not in ("missing_rows", "extra_rows")},
+        "comparison_id": comparison_id,
+        "upload": {k: upload[k] for k in ("id", "filename", "row_count", "uploaded_at", "mapping")},
+    }
+
+
+@app.get("/api/partners/{partner_name}/comparison")
+async def api_comparison(partner_name: str):
+    """The stored comparison for a partner - counts only, rows load separately."""
+    _require_partner(partner_name)
+    comparison = store.latest_comparison(partner_name)
+    upload = store.latest_upload(partner_name)
+    return {
+        "comparison": comparison,
+        "upload": upload,
+        "history": store.comparison_history(partner_name, limit=20),
+        "max_compare_rows": config.max_compare_rows,
+        "configured": bool(config.queries.get("partner_records")),
+    }
+
+
+@app.get("/api/comparisons/{comparison_id}/rows")
+async def api_comparison_rows(
+    comparison_id: int,
+    side: str = Query("missing", pattern="^(missing|extra)$"),
+    q: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """One page of the missing or extra rows. Paged because a large partner has
+    tens of thousands and the page must not try to render them all."""
+    if not store.comparison(comparison_id):
+        raise HTTPException(status_code=404, detail="unknown comparison")
+    return {**store.comparison_rows(comparison_id, side, q, offset, limit),
+            "side": side, "offset": offset, "limit": limit}
+
+
+@app.get("/api/partners/{partner_name}/uploads")
+async def api_uploads(partner_name: str):
+    return {"uploads": store.uploads(partner_name, limit=50)}
+
+
+@app.delete("/api/uploads/{upload_id}")
+async def api_delete_upload(upload_id: int):
+    upload = store.upload(upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail="unknown upload")
+    # Remove the stored file too. A missing file is not an error here - the row
+    # going away is the point, and a leftover path would just fail to download.
+    if upload.get("stored_path") and os.path.isfile(upload["stored_path"]):
+        try:
+            os.remove(upload["stored_path"])
+        except OSError:
+            pass
+    store.delete_upload(upload_id)
+    return {"status": "ok", "deleted": upload_id}
+
+
+# ---------------------------------------------------------------------------
+# API - issues
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/issues")
+async def api_issues(
+    severity: str = "", scope: str = "", kind: str = "", q: str = "",
+):
+    state = full_state()
+    found = state["issues"]
+
+    if severity:
+        found = [i for i in found if i["severity"] == severity]
+    if scope:
+        found = [i for i in found if i["scope"] == scope]
+    if kind:
+        found = [i for i in found if i["kind"] == kind]
+    if q.strip():
+        needle = q.strip().lower()
+        found = [
+            i for i in found
+            if needle in i["subject"].lower() or needle in i["title"].lower()
+            or needle in i["detail"].lower()
+        ]
+
+    return {
+        "issues": found,
+        # The summary always describes everything, not the filtered subset, so
+        # the tiles do not move when a filter is applied.
+        "summary": issues_mod.summarise(state["issues"]),
+        "now": time.time(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# API - logs
+# ---------------------------------------------------------------------------
+
+
+def _log_files() -> List[Dict[str, Any]]:
+    return applog.available(BASE_DIR, extra=[config.log_file])
+
+
+def _resolve_log(name: str) -> str:
+    """Map a requested log name to a path we are willing to read.
+
+    Matched against the known list rather than joined onto a directory: a name
+    is user input, and `../../etc/passwd` must not resolve to anything.
+    """
+    for entry in _log_files():
+        if entry["name"] == name:
+            return entry["path"]
+    raise HTTPException(status_code=404, detail=f"unknown log file: {name}")
+
+
+@app.get("/api/logs/files")
+async def api_log_files():
+    files = _log_files()
+    for entry in files:
+        entry["modified_iso"] = _iso(entry["modified"])
+    return {"files": files}
+
+
+@app.get("/api/logs")
+async def api_logs(
+    file: str = "",
+    q: str = "",
+    level: str = "",
+    status_class: str = "",
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    files = _log_files()
+    if not files:
+        return {"lines": [], "total": 0, "file": None, "files": [],
+                "summary": {}, "error": "no log files found"}
+
+    name = file or os.path.basename(config.log_file) or files[0]["name"]
+    path = _resolve_log(name)
+
+    result = applog.read(
+        path, query=q, level=level, since=since, until=until,
+        status_class=status_class, offset=offset, limit=limit,
+    )
+    return {
+        **result,
+        "file": name,
+        "files": [f["name"] for f in files],
+        "summary": applog.summarise(path),
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +971,7 @@ async def api_cron_report(report: CronReport, x_agent_secret: str = Header(None)
     # Wholesale replace, exactly as the SSH collector did: a job deleted on the
     # server has to disappear here too, not linger as a phantom.
     store.replace_cron_jobs(server, report.hostname or report.server_id, rows)
+    _CRON_CACHE["at"] = 0.0          # new data - drop the cross-reference cache
     return {"status": "ok", "server": server, "jobs": len(rows)}
 
 
@@ -487,44 +1000,12 @@ _DB_IDENTITY: Dict[str, Any] = {}
 
 @app.get("/api/jobs/partners")
 async def api_partner_jobs():
-    """Ingest-job freshness per partner, worst first.
+    """Ingest-job freshness per partner, worst first."""
+    state = full_state()
+    rows = state["partners"]
 
-    Cross-references the collected crontabs, because "stopped inserting" plus
-    "has no cron entry" together mean the job was removed - which neither fact
-    establishes on its own.
-    """
-    rows = build_partner_rows()
-
-    cron_rows = store.cron_jobs()
-    collected_servers = {s["server"] for s in store.cron_servers()}
-    by_partner: Dict[str, List[Dict[str, Any]]] = {}
-    for cr in cron_rows:
-        if cr["partner"]:
-            by_partner.setdefault(cr["partner"].lower(), []).append(cr)
-
-    for r in rows:
-        entries = by_partner.get(r["name"].lower(), [])
-        active = [e for e in entries if not e["disabled"]]
-        if active:
-            r["cron_status"] = "found"
-        elif entries:
-            # Present but commented out - a deliberate disable, worth naming
-            # separately from a cron that isn't there at all.
-            r["cron_status"] = "disabled"
-        elif not collected_servers:
-            r["cron_status"] = "unknown"
-        elif r.get("server") and r["server"] not in collected_servers:
-            # We never looked at that box, so absence proves nothing.
-            r["cron_status"] = "unknown"
-        elif not r.get("server"):
-            r["cron_status"] = "unknown"
-        else:
-            r["cron_status"] = "missing"
-        r["cron_count"] = len(entries)
-        r["cron_schedule"] = (active or entries or [{}])[0].get("schedule_human")
-
-    for r in rows:
-        r["job_rank"] = jobs_mod.STATE_RANK.get(r.get("job_state"), 9)
+    for row in rows:
+        row["job_rank"] = jobs_mod.STATE_RANK.get(row.get("job_state"), 9)
     # A stalled partner whose cron is also missing is the most actionable thing
     # on the page, so it sorts above other stalled rows.
     rows.sort(key=lambda r: (
@@ -533,9 +1014,9 @@ async def api_partner_jobs():
         -(r.get("db_future") or 0),
     ))
 
-    counts = {}
-    for r in rows:
-        counts[r.get("job_state", "unknown")] = counts.get(r.get("job_state", "unknown"), 0) + 1
+    counts: Dict[str, int] = {}
+    for row in rows:
+        counts[row.get("job_state", "unknown")] = counts.get(row.get("job_state", "unknown"), 0) + 1
     return {
         "partners": rows,
         "summary": {
@@ -552,7 +1033,7 @@ async def api_partner_jobs():
                 1 for r in rows
                 if r.get("job_state") == "stalled" and r.get("cron_status") == "missing"
             ),
-            "cron_collected": len(collected_servers),
+            "cron_collected": len(cron_index()[1]),
         },
         "jobs": scheduler.status(),
         "now": time.time(),
@@ -622,6 +1103,318 @@ async def api_db_identity():
 async def api_db_ping():
     """Connectivity check against the partner MySQL - runs SELECT VERSION()."""
     return mysql.ping(config.database)
+
+
+@app.get("/api/settings")
+async def api_settings():
+    """What this instance is configured to do. Read-only on purpose.
+
+    Everything here comes from config.yaml and .env, which are the record. A
+    settings page that could write them would put the running configuration and
+    the file it was loaded from permanently out of step.
+    """
+    return {
+        "app": {
+            "counts_hourly": config.counts_hourly,
+            "counts_interval_seconds": config.counts_interval,
+            "health_interval_seconds": config.health_interval,
+            "health_checks_enabled": config.health_checks_enabled,
+            "cron_source": config.cron_source,
+            "pm2_stale_seconds": config.pm2_stale_seconds,
+            "history_keep_days": config.history_keep_days,
+            "max_compare_rows": config.max_compare_rows,
+            "max_upload_mb": round(config.max_upload_bytes / 1024 / 1024),
+            "scheduler_enabled": SCHEDULER_ENABLED,
+        },
+        "database": {
+            "host": config.database.get("host"),
+            "port": config.database.get("port"),
+            "user": config.database.get("user"),
+            "database": config.database.get("database"),
+            # Whether one is set, never the value.
+            "password_set": config.has_db_password,
+        },
+        "auth": {"enabled": config.auth_enabled, "user": config.auth_user},
+        "alerts": scheduler.alerter.status(),
+        "partners": {
+            "discovered": len(store.latest_counts()),
+            "excluded": sorted(config.excluded),
+            "min_live_events": config.min_live_events,
+            "with_meta": len(config.partner_meta),
+        },
+        "websites": len(config.websites),
+        "paths": {
+            "config": os.environ.get("OPS_CONFIG", os.path.join(BASE_DIR, "config.yaml")),
+            "database": config.db_path,
+            "uploads": config.upload_dir,
+            "log": config.log_file,
+        },
+        "queries": {
+            # The SQL itself, so what produced a number is inspectable without
+            # opening config.yaml on the server.
+            key: config.queries.get(key)
+            for key in ("all_partners", "feed_total", "db_future", "db_past", "partner_records")
+        },
+        "jobs": scheduler.status(),
+        "now": time.time(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Downloads
+# ---------------------------------------------------------------------------
+
+
+def csv_response(rows: Iterable[Dict[str, Any]], columns: Sequence[exports.Column],
+                 filename: str) -> StreamingResponse:
+    return StreamingResponse(
+        exports.to_csv(rows, columns),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/downloads")
+async def api_downloads():
+    """The catalogue the Downloads page lists.
+
+    Generated exports are always available; files are listed only when they
+    exist, so nothing offers a download that would 404.
+    """
+    log_files = _log_files()
+    uploads = store.uploads(limit=200)
+    comparisons = store.latest_comparisons()
+
+    generated = [
+        {"kind": "csv", "name": "All partners", "href": "/download/partners.csv",
+         "detail": "Every partner with counts, job state, cron status and issue count"},
+        {"kind": "csv", "name": "All issues", "href": "/download/issues.csv",
+         "detail": "Every open issue across partners, sites and processes"},
+        {"kind": "csv", "name": "Website health", "href": "/download/sites.csv",
+         "detail": "Latest check, 24h uptime and latency per site"},
+        {"kind": "csv", "name": "Cron inventory", "href": "/download/cron.csv",
+         "detail": "Every crontab line collected from every reporting server"},
+    ]
+
+    comparison_files = []
+    for partner, comparison in sorted(comparisons.items()):
+        for side, label in (("missing", "Missing from database"), ("extra", "Extra in database")):
+            count = comparison.get(side) or 0
+            if count:
+                comparison_files.append({
+                    "kind": "comparison", "name": f"{partner} - {label.lower()}",
+                    "href": f"/download/comparison/{comparison['id']}/{side}.csv",
+                    "detail": f"{count:,} rows, compared {_iso(comparison['computed_at'])}",
+                    "partner": partner, "count": count,
+                })
+
+    return {
+        "generated": generated,
+        "logs": [{
+            "kind": "log", "name": entry["name"],
+            "href": f"/download/log/{entry['name']}",
+            "detail": f"{entry['size'] / 1024:.0f} KB, modified {_iso(entry['modified'])}",
+            "size": entry["size"], "modified": entry["modified"],
+        } for entry in log_files],
+        "comparisons": comparison_files,
+        "uploads": [{
+            "kind": "upload", "name": upload["filename"],
+            "href": f"/download/upload/{upload['id']}",
+            "detail": f"{upload['partner']} · {upload['row_count'] or 0:,} rows · "
+                      f"uploaded {_iso(upload['uploaded_at'])}",
+            "partner": upload["partner"], "id": upload["id"],
+            "uploaded_at": upload["uploaded_at"],
+            "available": bool(upload.get("stored_path")
+                              and os.path.isfile(upload["stored_path"])),
+        } for upload in uploads],
+        "now": time.time(),
+    }
+
+
+@app.get("/download/partners.csv")
+async def download_partners():
+    rows = full_state()["partners"]
+    return csv_response(rows, exports.PARTNER_COLUMNS, "partners.csv")
+
+
+@app.get("/download/issues.csv")
+async def download_issues():
+    found = full_state()["issues"]
+    for issue in found:
+        issue["since_iso"] = _iso(issue.get("since"))
+    return csv_response(found, exports.ISSUE_COLUMNS, "issues.csv")
+
+
+@app.get("/download/sites.csv")
+async def download_sites():
+    return csv_response(build_site_rows(), exports.SITE_COLUMNS, "website-health.csv")
+
+
+@app.get("/download/cron.csv")
+async def download_cron():
+    rows = store.cron_jobs()
+    now = time.time()
+    for row in rows:
+        row["log_age_days"] = (
+            round((now - row["log_mtime"]) / 86400.0, 1) if row["log_mtime"] else None
+        )
+        row["disabled"] = bool(row["disabled"])
+    return csv_response(rows, exports.CRON_COLUMNS, "cron-inventory.csv")
+
+
+@app.get("/download/partner/{partner_name}/history.csv")
+async def download_partner_history(partner_name: str):
+    _require_partner(partner_name)
+    rows = store.counts_history(partner_name, limit=500)
+    for row in rows:
+        row["collected_at_iso"] = _iso(row["collected_at"])
+        row["ok"] = bool(row["ok"])
+        row["db_unpublished"] = (
+            max(row["feed_total"] - row["db_future"] - row["db_past"], 0)
+            if None not in (row["feed_total"], row["db_future"], row["db_past"])
+            else None
+        )
+    return csv_response(
+        rows, exports.HISTORY_COLUMNS,
+        exports.safe_filename(partner_name, "history") + ".csv",
+    )
+
+
+@app.get("/download/comparison/{comparison_id}/{side}.csv")
+async def download_comparison(comparison_id: int, side: str):
+    if side not in ("missing", "extra"):
+        raise HTTPException(status_code=400, detail="side must be missing or extra")
+    comparison = store.comparison(comparison_id)
+    if not comparison:
+        raise HTTPException(status_code=404, detail="unknown comparison")
+    rows = store.all_comparison_rows(comparison_id, side)
+    return csv_response(
+        rows, exports.COMPARISON_COLUMNS,
+        exports.safe_filename(comparison["partner"], side) + ".csv",
+    )
+
+
+@app.get("/download/log/{name}")
+async def download_log(name: str):
+    path = _resolve_log(name)
+    return FileResponse(path, media_type="text/plain", filename=name)
+
+
+@app.get("/download/logs.csv")
+async def download_log_csv(
+    file: str = "", q: str = "", level: str = "", status_class: str = "",
+):
+    """The filtered log view as a CSV - what is on screen, not the whole file."""
+    files = _log_files()
+    if not files:
+        raise HTTPException(status_code=404, detail="no log files found")
+    name = file or os.path.basename(config.log_file) or files[0]["name"]
+    result = applog.read(
+        _resolve_log(name), query=q, level=level,
+        status_class=status_class, offset=0, limit=100_000,
+    )
+    return csv_response(
+        result["lines"], exports.LOG_COLUMNS,
+        exports.safe_filename(name.replace(".log", ""), "filtered") + ".csv",
+    )
+
+
+@app.get("/download/upload/{upload_id}")
+async def download_upload(upload_id: int):
+    """The original spreadsheet back, exactly as it was uploaded."""
+    upload = store.upload(upload_id)
+    if not upload:
+        raise HTTPException(status_code=404, detail="unknown upload")
+    path = upload.get("stored_path")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(
+            status_code=410,
+            detail="the stored copy of this file is no longer on disk",
+        )
+    return FileResponse(path, filename=upload["filename"])
+
+
+@app.get("/download/partner-status.csv")
+async def download_partner_status():
+    """The Monday partner status sheet, if it is present beside the code."""
+    path = os.path.join(BASE_DIR, "partner-status.csv")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="partner-status.csv is not present")
+    return FileResponse(path, media_type="text/csv", filename="partner-status.csv")
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/reports/summary")
+async def api_report_summary():
+    """The management view: totals, health split, and the worst offenders.
+
+    Everything here is derived from the same rows the operational pages use, so
+    a report can never disagree with the dashboard it summarises.
+    """
+    state = full_state()
+    partners = state["partners"]
+    summary = build_summary(partners)
+    issue_summary = issues_mod.summarise(state["issues"])
+
+    by_status: Dict[str, int] = {}
+    for row in partners:
+        by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+
+    def top(rows: List[Dict[str, Any]], key: str, limit: int = 10) -> List[Dict[str, Any]]:
+        ranked = [r for r in rows if (r.get(key) or 0) > 0]
+        ranked.sort(key=lambda r: -(r.get(key) or 0))
+        return [{"name": r["name"], "value": r.get(key), "status": r["status"]}
+                for r in ranked[:limit]]
+
+    compared = [p for p in partners if p.get("comparison")]
+    for row in compared:
+        row["_missing"] = row["comparison"].get("missing") or 0
+        row["_extra"] = row["comparison"].get("extra") or 0
+
+    stalled = [p for p in partners if p.get("job_state") in ("stalled", "never")]
+    stalled.sort(key=lambda r: -(r.get("db_future") or 0))
+
+    return {
+        "generated_at": time.time(),
+        "totals": summary,
+        "issues": issue_summary,
+        "by_status": by_status,
+        "health": {
+            "healthy": by_status.get("success", 0),
+            "warning": by_status.get("warning", 0),
+            "failed": by_status.get("failed", 0),
+            "total": len(partners),
+            "healthy_pct": _pct(by_status.get("success", 0), len(partners)),
+        },
+        "biggest_partners": top(partners, "db_future"),
+        "most_unpublished": top(partners, "db_unpublished"),
+        "most_missing": top(compared, "_missing"),
+        "most_extra": top(compared, "_extra"),
+        "stalled": [{
+            "name": r["name"], "live": r.get("db_future"),
+            "days": r.get("job_days_since"), "frequency": r.get("frequency"),
+            "cron_status": r.get("cron_status"), "server": r.get("server"),
+        } for r in stalled[:15]],
+        "comparison_coverage": {
+            "compared": len(compared),
+            "total": len(partners),
+            "pct": _pct(len(compared), len(partners)),
+        },
+        "sites": {
+            "total": summary["sites_total"],
+            "down": summary["sites_down"],
+        },
+        "processes": {
+            "servers": summary["servers_total"],
+            "stale": summary["servers_stale"],
+            "total": summary["processes_total"],
+            "errored": summary["processes_errored"],
+        },
+    }
 
 
 @app.exception_handler(HTTPException)

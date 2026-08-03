@@ -54,6 +54,14 @@ APP_DEFAULTS = {
     "db_path": "ops.db",
     "history_keep_days": 90,
     "max_concurrent_queries": 4,
+    # Spreadsheet comparison. max_compare_rows is a refusal threshold, not a
+    # truncation point - see compare.py for why a partial diff is worse than none.
+    "upload_dir": "uploads",
+    "max_upload_mb": 25,
+    "max_compare_rows": 100_000,
+    # The dashboard's own log, which the Logs page reads.
+    "log_file": "dashboard.log",
+    "log_level": "INFO",
 }
 
 # config.yaml key -> environment variable that overrides it.
@@ -165,6 +173,15 @@ class Config:
         db_path = app["db_path"]
         self.db_path = db_path if os.path.isabs(db_path) else os.path.join(BASE_DIR, db_path)
 
+        # Uploaded partner sheets, and the dashboard's own log. Both resolve
+        # relative to the code, matching db_path, so a relative value in
+        # config.yaml behaves the same wherever the process was started from.
+        self.upload_dir: str = self._resolve(app["upload_dir"])
+        self.max_upload_bytes: int = int(float(app["max_upload_mb"]) * 1024 * 1024)
+        self.max_compare_rows: int = int(app["max_compare_rows"])
+        self.log_file: str = self._resolve(app["log_file"]) if app["log_file"] else ""
+        self.log_level: str = str(app["log_level"]).upper()
+
         self.database: Dict[str, Any] = dict(raw.get("database") or {})
         for key, env_var in DB_ENV.items():
             if os.environ.get(env_var):
@@ -184,6 +201,11 @@ class Config:
         self._meta_lower = {k.lower(): v for k, v in self.partner_meta.items()}
 
         self._validate()
+
+    @staticmethod
+    def _resolve(path: str) -> str:
+        """Relative paths are relative to the code, not to the shell's cwd."""
+        return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
 
     def is_excluded(self, partner: str) -> bool:
         return partner.strip().lower() in self.excluded

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Downloads · Ops{% endblock %}
+{% block heading %}Downloads{% endblock %}
+
+{% block content %}
+<div class="page-intro">
+  <div>
+    <p>
+      Everything the dashboard can hand you as a file. Generated exports are
+      built from current data at the moment you click; the rest are files that
+      already exist — log files, and the partner spreadsheets that were uploaded
+      for comparison.
+    </p>
+  </div>
+</div>
+
+<div id="sections"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function group(title, hint, items, emptyText) {
+  return `<div class="panel" style="margin-bottom:var(--s4)">
+    <div class="panel-head"><h2>${esc(title)}</h2><span class="hint">${esc(hint)}</span></div>
+    ${items.length ? `<div class="panel-body" style="display:grid;gap:var(--s2)">
+      ${items.map((f) => `
+        <div style="display:flex;align-items:center;gap:var(--s3);padding:var(--s2) var(--s3);
+                    border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${esc(f.name)}</div>
+            <div class="sub" style="white-space:normal">${esc(f.detail)}</div>
+          </div>
+          ${f.available === false
+            ? '<span class="badge idle" title="The stored copy is no longer on disk">GONE</span>'
+            : `<a class="btn small" href="${esc(f.href)}" download>Download</a>`}
+        </div>`).join('')}
+    </div>` : `<div class="panel-body">${emptyState(emptyText || 'Nothing here yet', '')}</div>`}
+  </div>`;
+}
+
+async function load() {
+  const data = await getJSON('/api/downloads');
+
+  document.getElementById('sections').innerHTML = [
+    group('Generated exports', 'built from current data on request', data.generated),
+    group('Comparison results',
+          `${data.comparisons.length} file${data.comparisons.length === 1 ? '' : 's'} from spreadsheet comparisons`,
+          data.comparisons,
+          'No comparisons have been run',
+          ),
+    group('Log files', 'the dashboard’s own logs, whole', data.logs, 'No log files found'),
+    group('Uploaded partner spreadsheets', 'the source of each comparison, kept so a result can be checked',
+          data.uploads, 'No spreadsheets uploaded yet'),
+    group('Reference', 'files shipped alongside the dashboard', [
+      { name: 'Monday partner status sheet', href: '/download/partner-status.csv',
+        detail: 'The status sheet partner_meta is generated from — server, frequency, path and notes per partner' },
+    ]),
+  ].join('');
+}
+
+startPolling(load, 60000);
+</script>
+{% endblock %}

@@ -11,3 +11,6 @@ __pycache__/
 ops.db-wal
 ops.db-shm
 ops.db.backup-*
+
+# Uploaded partner spreadsheets - data, not code, and potentially large.
+uploads/

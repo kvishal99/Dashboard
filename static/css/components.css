@@ -1,0 +1,744 @@
+/* Every reusable piece of the UI. Nothing here knows which page it is on. */
+
+/* ============================================================== panels */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.panel-head h2, .panel-head h3 {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.panel-head .hint {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  font-weight: 400;
+}
+.panel-body { padding: var(--s4); }
+.panel-body.tight { padding: var(--s3); }
+
+/* =============================================================== tiles */
+
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--s3) var(--s4);
+}
+.tile-label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+}
+.tile-value {
+  font-size: var(--text-stat);
+  font-weight: 650;
+  line-height: 1.15;
+  margin-top: var(--s1);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.tile-sub {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  margin-top: 2px;
+}
+/* Tint the figure, never the whole tile: a wall of coloured blocks is harder to
+ * read at a glance than one coloured number among plain ones. */
+.tile.is-ok   .tile-value { color: var(--ok); }
+.tile.is-warn .tile-value { color: var(--warn); }
+.tile.is-bad  .tile-value { color: var(--bad); }
+.tile.is-info .tile-value { color: var(--info); }
+
+/* A tile that filters the view below it when clicked. */
+.tile.clickable { cursor: pointer; transition: border-color var(--transition), box-shadow var(--transition); }
+.tile.clickable:hover { border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+.tile.clickable.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+
+/* ======================================================= partner cards */
+
+/* The main dashboard unit. Five facts, one row of numbers, nothing else - the
+ * detail lives behind a click. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--idle-border);
+  border-radius: var(--radius-lg);
+  padding: var(--s3) var(--s4);
+  display: block;
+  color: inherit;
+  transition: border-color var(--transition), box-shadow var(--transition);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  font: inherit;
+}
+.card:hover {
+  box-shadow: var(--shadow-sm);
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+/* The left edge carries status, so a wall of cards can be scanned in one pass
+ * without reading a single word. The badge inside says it in words too. */
+.card.status-success { border-left-color: var(--ok); }
+.card.status-warning { border-left-color: var(--warn); }
+.card.status-failed  { border-left-color: var(--bad); }
+.card.status-running { border-left-color: var(--info); }
+
+.card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+.card-name {
+  font-weight: 600;
+  font-size: var(--text-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-stats {
+  display: flex;
+  gap: var(--s4);
+  flex-wrap: wrap;
+}
+.card-stat .k {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.card-stat .v {
+  font-size: var(--text-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.card-foot {
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.card-issues {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-weight: 600;
+}
+.card-issues.none { color: var(--ok); }
+.card-issues.some { color: var(--bad); }
+.card-issues.warn { color: var(--warn); }
+
+/* ============================================================== badges */
+
+/* ::before carries a glyph, so state never rests on colour alone. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.badge::before { font-size: 0.7em; line-height: 1; }
+
+.badge.ok      { background: var(--ok-fill);   color: var(--ok);   border-color: var(--ok-border); }
+.badge.ok::before      { content: "\25CF"; }   /* filled circle */
+.badge.warn    { background: var(--warn-fill); color: var(--warn); border-color: var(--warn-border); }
+.badge.warn::before    { content: "\25C6"; }   /* diamond */
+.badge.bad     { background: var(--bad-fill);  color: var(--bad);  border-color: var(--bad-border); }
+.badge.bad::before     { content: "\25B2"; }   /* triangle */
+.badge.info    { background: var(--info-fill); color: var(--info); border-color: var(--info-border); }
+.badge.info::before    { content: "\25A0"; }   /* square */
+.badge.idle    { background: var(--idle-fill); color: var(--idle); border-color: var(--idle-border); }
+.badge.idle::before    { content: "\2013"; }   /* en dash */
+
+/* A running job pulses, because "in progress" is the one state where the
+ * difference between a live page and a frozen one matters. */
+.badge.running { background: var(--info-fill); color: var(--info); border-color: var(--info-border); }
+.badge.running::before { content: "\25CF"; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+.chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  background: var(--surface);
+  font-size: var(--text-sm);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.pill:hover { background: var(--surface-3); color: var(--text); }
+.pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.pill .n { font-variant-numeric: tabular-nums; opacity: 0.8; }
+
+/* ============================================================== tables */
+
+/* Sticky headers, done properly.
+ *
+ * The previous version gave up on this: its wrapper set overflow-x:auto, which
+ * makes the wrapper a scroll container on BOTH axes, so a sticky <th> sticks to
+ * the top of that container rather than to the viewport - and since the
+ * container scrolled with the page, the header scrolled away regardless.
+ *
+ * The fix is to let the container own the vertical scroll too. With a
+ * max-height on .table-scroll, the table scrolls inside it, and `position:
+ * sticky; top: 0` on the <th> is then relative to a container that is actually
+ * standing still. Horizontal scrolling still works, and the header scrolls
+ * sideways with the columns as it should.
+ */
+.table-scroll {
+  overflow: auto;
+  max-height: var(--table-max-h, 68vh);
+  overscroll-behavior: contain;
+}
+
+table {
+  width: 100%;
+  border-collapse: separate;   /* separate, so sticky th keeps its border */
+  border-spacing: 0;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-2);
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  white-space: nowrap;
+  /* A box-shadow rather than border-bottom: a border on a sticky element is
+   * painted at its original position and tears away as the body scrolls under. */
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+thead th.sortable { cursor: pointer; user-select: none; }
+thead th.sortable:hover { color: var(--text); background: var(--surface-3); }
+thead th .arrow { opacity: 0.4; margin-left: 2px; font-size: 0.85em; }
+thead th.sorted .arrow { opacity: 1; color: var(--accent); }
+
+/* A first column that stays put while the rest scrolls sideways. Without it,
+ * scrolling a wide table right leaves rows with no idea which partner they
+ * belong to. */
+th.sticky-col, td.sticky-col {
+  position: sticky;
+  left: 0;
+  background: var(--surface);
+  z-index: 1;
+  box-shadow: 1px 0 0 var(--border);
+}
+thead th.sticky-col { background: var(--surface-2); z-index: 3; }
+
+tbody td {
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: var(--surface-2); }
+tbody tr:hover td.sticky-col { background: var(--surface-2); }
+
+td.num, th.num { text-align: right; white-space: nowrap; }
+td.name { font-weight: 600; }
+td .sub {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  font-weight: 400;
+  margin-top: 1px;
+}
+
+/* Rows that open. The chevron rotates, and the detail row spans every column. */
+tr.expandable td:first-child { position: relative; }
+tr.expandable { cursor: pointer; }
+.expander {
+  display: inline-block;
+  width: 14px;
+  color: var(--subtle);
+  transition: transform var(--transition);
+  font-size: 0.7rem;
+}
+tr.open .expander { transform: rotate(90deg); }
+tr.detail-row > td {
+  background: var(--surface-2);
+  padding: var(--s4);
+  border-bottom: 1px solid var(--border);
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--s3) var(--s5);
+}
+.detail-grid dt {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 600;
+}
+.detail-grid dd {
+  margin: 2px 0 0;
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  padding: var(--s8) var(--s4);
+  text-align: center;
+  color: var(--muted);
+}
+.empty .big { font-size: var(--text-md); color: var(--text); font-weight: 600; margin-bottom: var(--s1); }
+
+/* ============================================================ toolbar */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-wrap: wrap;
+}
+.toolbar .spacer { flex: 1; min-width: 0; }
+.toolbar .result-count {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ========================================================= pagination */
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  flex-wrap: wrap;
+}
+.pager-info {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.pager-controls { display: flex; align-items: center; gap: var(--s1); }
+.pager button {
+  min-width: 30px;
+  padding: 4px 8px;
+  font-size: var(--text-sm);
+}
+.pager button.current {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--inverse);
+}
+.pager .gap { color: var(--subtle); padding: 0 2px; }
+
+/* ============================================================ controls */
+
+button, .btn {
+  font-family: inherit;
+  font-size: var(--text-md);
+  font-weight: 550;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: background var(--transition), border-color var(--transition);
+  line-height: 1.4;
+}
+button:hover, .btn:hover { background: var(--surface-3); text-decoration: none; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.primary, .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--inverse);
+}
+button.primary:hover, .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+button.subtle {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 8px;
+}
+button.subtle:hover { background: var(--surface-3); color: var(--text); }
+
+button.danger { color: var(--bad); border-color: var(--bad-border); }
+button.danger:hover { background: var(--bad-fill); }
+
+button.small, .btn.small { font-size: var(--text-sm); padding: 4px 9px; }
+
+input[type="search"], input[type="text"], input[type="date"], select, textarea {
+  font-family: inherit;
+  font-size: var(--text-md);
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  min-width: 0;
+}
+input[type="search"] { min-width: 220px; }
+input::placeholder { color: var(--subtle); }
+select { cursor: pointer; }
+
+label.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-md);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field > span {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* =============================================================== meter */
+
+/* Magnitude, so a single hue. The figure beside it does the precise work; the
+ * bar is only there to make relative size scannable down a column. */
+.meter { display: flex; align-items: center; gap: var(--s2); min-width: 110px; }
+.meter .track {
+  flex: 1;
+  height: 5px;
+  background: var(--meter-track);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 40px;
+}
+.meter .fill { height: 100%; background: var(--meter); border-radius: 3px; }
+.meter .pct {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  min-width: 46px;
+  text-align: right;
+}
+
+/* ======================================================= comparison bar */
+
+/* Spreadsheet vs database, as one bar. Three segments that add up to the whole
+ * sheet, so "where the mismatch is" is answered by looking rather than by
+ * subtracting two numbers.
+ *
+ * These three are a composition, not a status scale - matching is not "good
+ * news" and extra is not "an error" - but they do map onto how much attention
+ * each deserves, so the status hues are reused deliberately.
+ */
+.compare-bar {
+  display: flex;
+  height: 26px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-3);
+}
+.compare-bar .seg {
+  display: grid;
+  place-items: center;
+  font-size: var(--text-xs);
+  font-weight: 650;
+  color: var(--inverse);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: flex-basis var(--transition);
+}
+.compare-bar .seg.matching { background: #2e8b57; }
+.compare-bar .seg.missing  { background: #b3261e; }
+.compare-bar .seg.extra    { background: #b8860b; }
+/* Below ~6% a segment is too narrow for its own label; the legend under the bar
+ * carries every number anyway, so the label is simply dropped. */
+.compare-bar .seg.narrow { font-size: 0; }
+
+.compare-legend {
+  display: flex;
+  gap: var(--s4);
+  flex-wrap: wrap;
+  margin-top: var(--s2);
+}
+.compare-legend .item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+}
+.compare-legend .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.compare-legend .swatch.matching { background: #2e8b57; }
+.compare-legend .swatch.missing  { background: #b3261e; }
+.compare-legend .swatch.extra    { background: #b8860b; }
+.compare-legend .n { font-weight: 650; font-variant-numeric: tabular-nums; }
+
+/* ========================================================== slide-over */
+
+.slideover {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(720px, 100vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(100%);
+  transition: transform 180ms ease;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+}
+.slideover.open { transform: translateX(0); }
+.slideover-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s4);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.slideover-head h2 { font-size: var(--text-lg); flex: 1; min-width: 0; }
+.slideover-body { padding: var(--s4); overflow-y: auto; flex: 1; }
+.slideover-foot {
+  padding: var(--s3) var(--s4);
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: var(--s2);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+/* ============================================================= upload */
+
+.dropzone {
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: var(--s6);
+  text-align: center;
+  color: var(--muted);
+  transition: border-color var(--transition), background var(--transition);
+  cursor: pointer;
+}
+.dropzone:hover, .dropzone.dragover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.dropzone .big { font-size: var(--text-md); font-weight: 600; color: var(--text); }
+.dropzone.dragover .big { color: var(--accent); }
+
+/* The detected column mapping, shown after an upload so a wrong guess is
+ * caught before it turns into a wrong comparison. */
+.mapping {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+.mapping .pair {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--s2) var(--s3);
+  font-size: var(--text-sm);
+}
+.mapping .pair .field-name {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  font-weight: 600;
+}
+.mapping .pair .col { font-weight: 600; font-family: var(--mono); font-size: var(--text-sm); }
+.mapping .pair.unmapped .col { color: var(--subtle); font-style: italic; font-family: var(--font); font-weight: 400; }
+
+/* ============================================================= notices */
+
+.notice {
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font-size: var(--text-md);
+  line-height: 1.55;
+  display: flex;
+  gap: var(--s3);
+  align-items: flex-start;
+}
+.notice .body { flex: 1; min-width: 0; }
+.notice strong { font-weight: 650; }
+.notice.warn { background: var(--warn-fill); border-color: var(--warn-border); color: #6b4600; }
+.notice.bad  { background: var(--bad-fill);  border-color: var(--bad-border);  color: #8c1d18; }
+.notice.info { background: var(--info-fill); border-color: var(--info-border); color: #14477f; }
+.notice.ok   { background: var(--ok-fill);   border-color: var(--ok-border);   color: #0b5c30; }
+.notice code, .notice .mono { background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; }
+
+/* ============================================================== legend */
+
+/* The same wording as the badge tooltips, printed where it can simply be read.
+ * A tooltip is invisible on a touch screen and unfindable if you don't know to
+ * hover, so the meaning has to exist somewhere non-interactive. */
+details.legend {
+  border-top: 1px solid var(--border);
+  padding: var(--s3) var(--s4);
+  background: var(--surface-2);
+}
+details.legend > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--text-md);
+  list-style: revert;
+}
+details.legend > summary:hover { color: var(--accent); }
+details.legend dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--s2) var(--s4);
+  margin: var(--s3) 0 0;
+  align-items: baseline;
+}
+details.legend dd { margin: 0; color: var(--muted); font-size: var(--text-base); }
+@media (max-width: 700px) {
+  details.legend dl { grid-template-columns: 1fr; gap: 2px 0; }
+  details.legend dd { margin-bottom: var(--s2); }
+}
+
+/* =============================================================== misc */
+
+.muted { color: var(--muted); }
+.subtle { color: var(--subtle); }
+.err { color: var(--bad); font-size: var(--text-sm); }
+.mono { font-family: var(--mono); font-size: 0.95em; }
+.nowrap { white-space: nowrap; }
+.right { text-align: right; }
+
+.spark { display: inline-flex; gap: 1px; align-items: flex-end; height: 20px; }
+.spark i { width: 3px; background: var(--meter); border-radius: 1px; min-height: 2px; display: block; }
+.spark i.bad { background: var(--bad); }
+
+/* A skeleton, not a spinner: it holds the space the content will occupy, so the
+ * page does not jump when data arrives. */
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-3) 25%, var(--surface-2) 37%, var(--surface-3) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+  border-radius: var(--radius);
+  height: 1em;
+}
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+.log-line {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+tr.level-ERROR td, tr.level-CRITICAL td { background: var(--bad-fill); }
+tr.level-WARNING td { background: var(--warn-fill); }
+tr.level-ERROR:hover td, tr.level-CRITICAL:hover td { background: #fbe0dd; }
+tr.level-WARNING:hover td { background: #fbecd4; }
+
+.toast {
+  position: fixed;
+  bottom: var(--s5);
+  right: var(--s5);
+  background: var(--text);
+  color: var(--inverse);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  font-size: var(--text-md);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity var(--transition), transform var(--transition);
+  pointer-events: none;
+  z-index: 80;
+  max-width: min(460px, calc(100vw - 40px));
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.bad { background: var(--bad); }
+.toast.ok  { background: var(--ok); }
+
+/* Visible only to screen readers - used for live-region announcements. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

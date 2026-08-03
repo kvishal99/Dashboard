@@ -1,112 +1,493 @@
 {% extends "base.html" %}
-{% block title %}{{ partner.name }} · Ops Dashboard{% endblock %}
+{% block title %}{{ partner.name }} · Ops{% endblock %}
+{% block heading %}<a href="/partners" class="muted" style="font-weight:400">Partners</a> / {{ partner.name }}{% endblock %}
+
+{% block topbar %}
+<button id="refresh-one" class="small">Refresh counts</button>
+{% endblock %}
 
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>{{ partner.name }}</h1>
-    <p>
-      <a href="/">← All partners</a>
-      {% if partner.frequency %}&nbsp;·&nbsp; runs {{ partner.frequency }}{% endif %}
-      {% if partner.server %}&nbsp;·&nbsp; server {{ partner.server }}{% endif %}
-    </p>
-    {% if partner.path %}<p class="mono muted" style="margin-top:6px">{{ partner.path }}</p>{% endif %}
-    {% if partner.note %}<p style="margin-top:6px;color:var(--warn)">{{ partner.note }}</p>{% endif %}
-  </div>
-  <div class="actions">
-    <button id="refresh-one" class="primary">Refresh this partner</button>
+{#
+  The detail page, where more depth is allowed because this is not the main
+  dashboard. Everything below is fetched when the page opens, and each tab's
+  heavy content only when that tab is first shown.
+#}
+
+<div class="tiles" id="tiles"></div>
+
+<div class="section">
+  <div class="toolbar" style="border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)">
+    <button class="pill active" data-tab="compare">Spreadsheet comparison</button>
+    <button class="pill" data-tab="issues">Issues <span class="n" id="tab-issue-count"></span></button>
+    <button class="pill" data-tab="history">Count history</button>
+    <button class="pill" data-tab="files">Files &amp; downloads</button>
+    <span class="spacer"></span>
+    <span class="muted" id="partner-meta"></span>
   </div>
 </div>
 
-<div class="stat-row" id="stats"></div>
-
-<div class="panel">
-  <h2>
-    <span>Count history</span>
-    <span class="hint">most recent first · one row per collection</span>
-  </h2>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Collected</th>
-          <th class="num">Total inserted</th>
-          <th class="num">Live in database</th>
-          <th class="num">Already ended</th>
-          <th class="num">Not published</th>
-          <th>% still live</th>
-          <th class="num">Query time</th>
-          <th>Status</th>
-        </tr>
-      </thead>
-      <tbody id="history"></tbody>
-    </table>
-  </div>
-  <div id="legend"></div>
-</div>
+<section id="tab-compare" class="tab-panel"></section>
+<section id="tab-issues" class="tab-panel" hidden></section>
+<section id="tab-history" class="tab-panel" hidden></section>
+<section id="tab-files" class="tab-panel" hidden></section>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const PARTNER = {{ partner.name | tojson }};
+const API = `/api/partners/${encodeURIComponent(PARTNER)}`;
 
-function renderStats(p) {
-  const tiles = [
-    { label: 'Total inserted', value: fmtNum(p.feed_total), sub: fmtShort(p.feed_total) || 'total held' },
-    { label: 'Live in database', value: fmtNum(p.db_future), sub: 'published, today &amp; future' },
-    { label: 'Already ended', value: fmtNum(p.db_past), sub: 'inserted fine, just over' },
+let PARTNER_ROW = null;
+let COMPARISON = null;
+let UPLOAD = null;
+const loaded = { history: false, files: false };
+let missingTable = null;
+let extraTable = null;
+
+/* ------------------------------------------------------------- tiles */
+
+function renderTiles(p) {
+  const c = p.comparison;
+  document.getElementById('tiles').innerHTML = tiles([
+    { label: 'In spreadsheet', value: fmtNum(c && c.ok ? c.sheet_total : p.partner_feed_count),
+      sub: c && c.ok ? 'rows in the uploaded sheet'
+                     : (p.partner_feed_count !== null ? `reported by ${esc(p.feed_source || 'script')}` : 'no sheet uploaded'),
+      cls: 'is-info' },
+    { label: 'In database', value: fmtNum(p.feed_total), sub: fmtShort(p.feed_total) || 'records we hold' },
+    { label: 'Matching', value: c && c.ok ? fmtNum(c.matching) : '—',
+      sub: c && c.ok ? 'present on both sides' : 'upload a sheet to compare',
+      cls: c && c.ok ? 'is-ok' : '' },
+    { label: 'Missing', value: c && c.ok ? fmtNum(c.missing) : '—',
+      sub: c && c.ok ? 'in the sheet, not in our DB' : '—',
+      cls: c && c.ok && c.missing ? 'is-bad' : '' },
+    { label: 'Extra', value: c && c.ok ? fmtNum(c.extra) : '—',
+      sub: c && c.ok ? 'in our DB, not in the sheet' : '—',
+      cls: c && c.ok && c.extra ? 'is-warn' : '' },
+    { label: 'Live', value: fmtNum(p.db_future), sub: `${fmtPct(p.live_pct)} of everything held` },
     { label: 'Not published', value: fmtNum(p.db_unpublished),
-      sub: p.unpublished_pct !== null ? `${p.unpublished_pct.toFixed(1)}% of inserted` : 'never went live',
-      cls: p.unpublished_pct !== null && p.unpublished_pct >= 40 ? 'is-warn' : '' },
-    { label: '% still live', value: p.live_pct === null ? '—' : p.live_pct.toFixed(1) + '%', sub: 'live ÷ total inserted' },
-    { label: 'Last checked', value: timeAgo(p.collected_at),
-      sub: p.duration_ms ? `query took ${(p.duration_ms / 1000).toFixed(1)}s` : '—',
+      sub: p.unpublished_pct !== null ? `${fmtPct(p.unpublished_pct, 0)} of total` : 'never went live',
+      cls: p.unpublished_pct >= 40 ? 'is-warn' : '' },
+    { label: 'Last successful sync', value: timeAgo(p.collected_at),
+      sub: p.ok === false ? 'last attempt FAILED' : (p.duration_ms ? `query took ${(p.duration_ms / 1000).toFixed(1)}s` : '—'),
       cls: p.ok === false ? 'is-bad' : '' },
-  ];
-  document.getElementById('stats').innerHTML = tiles.map((t) => `
-    <div class="stat ${t.cls || ''}">
-      <div class="label">${t.label}</div>
-      <div class="value">${t.value}</div>
-      <div class="sub">${t.sub}</div>
-    </div>`).join('');
+  ]);
+
+  document.getElementById('tab-issue-count').textContent = p.issue_count || 0;
+  document.getElementById('partner-meta').innerHTML = [
+    p.server ? `<span class="chip">${esc(p.server)}</span>` : '',
+    p.frequency ? esc(p.frequency) : '',
+    jobBadge(p.job_state),
+  ].filter(Boolean).join(' · ');
 }
 
-function renderHistory(rows) {
-  if (!rows.length) {
-    document.getElementById('history').innerHTML =
-      '<tr><td colspan="8" class="empty">No collections recorded yet.</td></tr>';
+/* ------------------------------------------------- spreadsheet comparison */
+
+function renderCompare() {
+  const c = COMPARISON;
+  const el = document.getElementById('tab-compare');
+
+  const uploadPanel = `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head">
+        <h2>Partner spreadsheet</h2>
+        <span class="hint">${UPLOAD
+          ? `${esc(UPLOAD.filename)} · ${fmtNum(UPLOAD.row_count)} rows · uploaded ${timeAgo(UPLOAD.uploaded_at)}`
+          : 'nothing uploaded yet'}</span>
+      </div>
+      <div class="panel-body">
+        <div class="dropzone" id="dropzone" role="button" tabindex="0">
+          <div class="big">Drop a .csv or .xlsx here, or click to choose</div>
+          <div style="margin-top:var(--s1)">
+            The sheet needs a tour name, an id, or a product URL column —
+            that is what ties its rows to ours.
+          </div>
+          <input type="file" id="file-input" accept=".csv,.xlsx,.tsv,text/csv" hidden>
+        </div>
+        <div id="mapping"></div>
+        <div style="margin-top:var(--s4);display:flex;gap:var(--s2);flex-wrap:wrap">
+          <button class="primary" id="run-compare" ${UPLOAD ? '' : 'disabled'}>
+            Compare against database
+          </button>
+          ${UPLOAD ? `<a class="btn" href="/download/upload/${UPLOAD.id}" download>Download this sheet</a>
+            <button class="danger" id="delete-upload">Delete upload</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+
+  if (!c) {
+    el.innerHTML = uploadPanel + `<div class="notice info"><div class="body">
+      <strong>No comparison has been run yet.</strong>
+      Counts alone cannot answer this: two sides can hold the same number of
+      records and still not hold the same records. Upload the partner's
+      spreadsheet and compare to get real matching, missing and extra sets.
+    </div></div>`;
+    wireUpload();
     return;
   }
-  document.getElementById('history').innerHTML = rows.map((h) => {
-    const unpub = (h.feed_total !== null && h.db_future !== null && h.db_past !== null)
-      ? Math.max(h.feed_total - h.db_future - h.db_past, 0) : null;
-    const pct = (h.feed_total && h.db_future !== null)
-      ? (100 * h.db_future / h.feed_total) : null;
-    return `<tr>
-      <td class="muted" style="font-size:0.82rem">${fmtTime(h.collected_at)}</td>
-      <td class="num">${fmtNum(h.feed_total)}</td>
-      <td class="num">${fmtNum(h.db_future)}</td>
-      <td class="num">${fmtNum(h.db_past)}</td>
-      <td class="num">${fmtNum(unpub)}</td>
-      <td>${meter(pct)}</td>
-      <td class="num muted">${h.duration_ms ? (h.duration_ms / 1000).toFixed(1) + 's' : '—'}</td>
-      <td>${h.ok ? badge('up', 'OK', 'history') : badge('down', 'FAILED', 'history')}
-        ${h.error ? `<div class="err" style="max-width:40ch">${esc(h.error)}</div>` : ''}</td>
-    </tr>`;
-  }).join('');
+
+  if (!c.ok) {
+    el.innerHTML = uploadPanel + `<div class="notice bad"><div class="body">
+      <strong>The last comparison did not produce a result.</strong><br>
+      ${esc(c.error || 'No reason was recorded.')}
+    </div></div>`;
+    wireUpload();
+    return;
+  }
+
+  el.innerHTML = uploadPanel + `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head">
+        <h2>Spreadsheet vs database</h2>
+        <span class="hint">
+          matched on <strong>${esc(c.strategy_label || '—')}</strong> ·
+          compared ${timeAgo(c.computed_at)}
+        </span>
+      </div>
+      <div class="panel-body">
+        ${comparisonBar(c)}
+
+        ${c.reliable === 0 || c.reliable === false ? `<div class="notice warn" style="margin-top:var(--s4)">
+          <div class="body"><strong>This comparison is probably measuring a column mismatch, not real gaps.</strong>
+          Only ${fmtPct((c.match_rate || 0) * 100, 0)} of rows matched on
+          ${esc(c.strategy_label)}. Check that the right column was detected in the
+          sheet above before acting on the missing count.</div></div>` : ''}
+
+        <dl class="detail-grid" style="margin-top:var(--s4)">
+          <div><dt>Total in spreadsheet</dt><dd style="font-size:var(--text-lg);font-weight:650">${fmtNum(c.sheet_total)}</dd></div>
+          <div><dt>Total in database</dt><dd style="font-size:var(--text-lg);font-weight:650">${fmtNum(c.db_total)}</dd></div>
+          <div><dt>Matching</dt><dd style="font-size:var(--text-lg);font-weight:650;color:var(--ok)">${fmtNum(c.matching)}</dd></div>
+          <div><dt>Missing from database</dt><dd style="font-size:var(--text-lg);font-weight:650;color:var(--bad)">${fmtNum(c.missing)}</dd></div>
+          <div><dt>Extra in database</dt><dd style="font-size:var(--text-lg);font-weight:650;color:var(--warn)">${fmtNum(c.extra)}</dd></div>
+          <div><dt>Duplicates in sheet</dt><dd>${fmtNum(c.sheet_duplicates)}</dd></div>
+          <div><dt>Duplicates in database</dt><dd>${fmtNum(c.db_duplicates)}</dd></div>
+          <div><dt>Match rate</dt><dd>${fmtPct((c.match_rate || 0) * 100)}</dd></div>
+        </dl>
+      </div>
+      ${statusLegend('compare', 'What matching, missing and extra mean')}
+    </div>
+
+    <div class="split">
+      <div id="missing-table"></div>
+      <div id="extra-table"></div>
+    </div>`;
+
+  wireUpload();
+  buildRowTables(c);
 }
 
-async function refresh() {
-  const [summary, hist] = await Promise.all([
-    getJSON(`/api/partners/${encodeURIComponent(PARTNER)}`),
-    getJSON(`/api/partners/${encodeURIComponent(PARTNER)}/history?limit=60`),
+/* The row lists. Paged from the server, because a large partner produces tens
+ * of thousands of missing rows and shipping them all to slice out 50 would be
+ * slow to fetch, heavy to hold and pointless to render. */
+function buildRowTables(c) {
+  const columns = [
+    { key: 'title', label: 'Title', sortable: false,
+      render: (r) => esc(r.title || '—') },
+    { key: 'start_date', label: 'Start', sortable: false,
+      render: (r) => `<span class="nowrap">${esc(r.start_date || '—')}</span>` },
+    { key: 'external_id', label: 'ID', sortable: false,
+      render: (r) => `<span class="chip">${esc(r.external_id || '—')}</span>` },
+  ];
+
+  missingTable = new RemoteTable('#missing-table', {
+    title: `Missing from database (${fmtNum(c.missing)})`,
+    hint: 'in the spreadsheet, not in ours',
+    columns,
+    searchKeys: ['title'],
+    searchPlaceholder: 'Search missing…',
+    exportHref: `/download/comparison/${c.id}/missing.csv`,
+    pageSize: 25,
+    maxHeight: '46vh',
+    emptyTitle: 'Nothing missing',
+    emptyDetail: 'Every row in the spreadsheet has a match in the database.',
+    fetchPage: ({ offset, limit, query }) =>
+      getJSON(`/api/comparisons/${c.id}/rows?side=missing&offset=${offset}&limit=${limit}&q=${encodeURIComponent(query || '')}`),
+  });
+
+  extraTable = new RemoteTable('#extra-table', {
+    title: `Extra in database (${fmtNum(c.extra)})`,
+    hint: 'in ours, not in the spreadsheet',
+    columns,
+    searchKeys: ['title'],
+    searchPlaceholder: 'Search extra…',
+    exportHref: `/download/comparison/${c.id}/extra.csv`,
+    pageSize: 25,
+    maxHeight: '46vh',
+    emptyTitle: 'Nothing extra',
+    emptyDetail: 'Every record in the database appears in the spreadsheet.',
+    fetchPage: ({ offset, limit, query }) =>
+      getJSON(`/api/comparisons/${c.id}/rows?side=extra&offset=${offset}&limit=${limit}&q=${encodeURIComponent(query || '')}`),
+  });
+}
+
+/* ------------------------------------------------------------- upload */
+
+function renderMapping(mapping, headers) {
+  const labels = {
+    external_id: 'Partner ID', title: 'Title', start_date: 'Start date',
+    end_date: 'End date', venue: 'Venue', url: 'Product URL',
+  };
+  document.getElementById('mapping').innerHTML = `
+    <div class="notice ok" style="margin-top:var(--s3)"><div class="body">
+      <strong>Sheet read.</strong> These are the columns it will be compared on —
+      check them before running the comparison.
+    </div></div>
+    <div class="mapping">
+      ${Object.entries(labels).map(([field, label]) => {
+        const column = mapping[field];
+        return `<div class="pair ${column ? '' : 'unmapped'}">
+          <div class="field-name">${esc(label)}</div>
+          <div class="col">${column ? esc(column) : 'not found in sheet'}</div>
+        </div>`;
+      }).join('')}
+    </div>`;
+}
+
+function wireUpload() {
+  const zone = document.getElementById('dropzone');
+  const input = document.getElementById('file-input');
+  if (!zone || !input) return;
+
+  const choose = () => input.click();
+  zone.addEventListener('click', choose);
+  zone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); }
+  });
+  ['dragenter', 'dragover'].forEach((type) => zone.addEventListener(type, (e) => {
+    e.preventDefault();
+    zone.classList.add('dragover');
+  }));
+  ['dragleave', 'drop'].forEach((type) => zone.addEventListener(type, (e) => {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+  }));
+  zone.addEventListener('drop', (e) => {
+    if (e.dataTransfer.files.length) upload(e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) upload(input.files[0]);
+  });
+
+  const runBtn = document.getElementById('run-compare');
+  if (runBtn) runBtn.addEventListener('click', runComparison);
+
+  const deleteBtn = document.getElementById('delete-upload');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', async () => {
+      if (!confirm(`Delete "${UPLOAD.filename}" and every comparison built from it?`)) return;
+      try {
+        await sendJSON(`/api/uploads/${UPLOAD.id}`, 'DELETE');
+        toast('Upload deleted', 'ok');
+        await loadComparison();
+      } catch (err) {
+        toast(err.message, 'bad');
+      }
+    });
+  }
+}
+
+/* Sent as the raw request body with the name in a header - no multipart, so no
+ * seventh dependency for one button. */
+async function upload(file) {
+  const zone = document.getElementById('dropzone');
+  zone.innerHTML = `<div class="big">Reading ${esc(file.name)}…</div>`;
+  try {
+    const res = await fetch(`${API}/upload`, {
+      method: 'POST',
+      headers: { 'X-Filename': file.name },
+      body: file,
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || `${res.status} ${res.statusText}`);
+
+    toast(`Read ${fmtNum(body.rows)} rows`, 'ok');
+    await loadComparison();
+    renderMapping(body.mapping, body.headers);
+    // Straight into the comparison: uploading a sheet and not comparing it is
+    // never what anyone meant to do.
+    await runComparison();
+  } catch (err) {
+    toast(err.message, 'bad');
+    renderCompare();
+  }
+}
+
+async function runComparison() {
+  const btn = document.getElementById('run-compare');
+  if (btn) { btn.disabled = true; btn.textContent = 'Comparing…'; }
+  try {
+    const result = await postJSON(`${API}/compare`);
+    if (result.ok) {
+      toast(`${fmtNum(result.matching)} matching · ${fmtNum(result.missing)} missing · ${fmtNum(result.extra)} extra`, 'ok');
+    } else {
+      toast(result.error || 'Comparison produced no result', 'bad');
+    }
+    await loadComparison();
+    await load();
+  } catch (err) {
+    toast(err.message, 'bad');
+    if (btn) { btn.disabled = false; btn.textContent = 'Compare against database'; }
+  }
+}
+
+async function loadComparison() {
+  const data = await getJSON(`${API}/comparison`);
+  COMPARISON = data.comparison;
+  UPLOAD = data.upload;
+  renderCompare();
+}
+
+/* ------------------------------------------------------------- issues */
+
+function renderIssues(p) {
+  const el = document.getElementById('tab-issues');
+  if (!p.issues || !p.issues.length) {
+    el.innerHTML = `<div class="panel"><div class="panel-body">
+      ${emptyState('No open issues', 'Counts are current, the ingest job is on schedule, and records are live.')}
+    </div></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="panel">
+    <div class="panel-head"><h2>Issues</h2><span class="hint">${p.issues.length} open, worst first</span></div>
+    <div class="panel-body" style="display:grid;gap:var(--s3)">
+      ${p.issues.map((i) => `<div class="notice ${i.severity === 'critical' ? 'bad' : (i.severity === 'warning' ? 'warn' : 'info')}">
+        <div class="body">
+          <strong>${esc(i.title)}</strong> ${severityBadge(i.severity)}<br>
+          ${esc(i.detail)}
+          ${i.since ? `<div class="subtle" style="margin-top:4px">since ${fmtTime(i.since)}</div>` : ''}
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>
+  ${p.error ? `<div class="panel" style="margin-top:var(--s4)">
+    <div class="panel-head"><h2>Last error</h2></div>
+    <div class="panel-body"><pre class="log-line">${esc(p.error)}</pre></div>
+  </div>` : ''}`;
+}
+
+/* ------------------------------------------------------------ history */
+
+async function loadHistory() {
+  if (loaded.history) return;
+  loaded.history = true;
+  const { history } = await getJSON(`${API}/history?limit=200`);
+
+  new DataTable('#tab-history', {
+    title: 'Count history',
+    hint: 'one row per collection, newest first',
+    rows: history,
+    searchable: false,
+    pageSize: 25,
+    maxHeight: '60vh',
+    exportHref: `/download/partner/${encodeURIComponent(PARTNER)}/history.csv`,
+    emptyTitle: 'No collections recorded yet',
+    legend: statusLegend('history'),
+    columns: [
+      { key: 'collected_at', label: 'Collected', sticky: true,
+        render: (r) => fmtTime(r.collected_at) },
+      { key: 'feed_total', label: 'Total', num: true, render: (r) => fmtNum(r.feed_total) },
+      { key: 'db_future', label: 'Live', num: true, render: (r) => fmtNum(r.db_future) },
+      { key: 'db_past', label: 'Ended', num: true, render: (r) => fmtNum(r.db_past) },
+      { key: 'db_unpublished', label: 'Not published', num: true, render: (r) => fmtNum(r.db_unpublished) },
+      { key: 'duration_ms', label: 'Query time', num: true,
+        render: (r) => (r.duration_ms ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—') },
+      { key: 'ok', label: 'Status',
+        render: (r) => (r.ok ? badge('ok', 'OK', 'history') : badge('bad', 'FAILED', 'history'))
+          + (r.error ? `<div class="err" style="max-width:40ch">${esc(r.error)}</div>` : '') },
+    ],
+  });
+}
+
+/* -------------------------------------------------------------- files */
+
+async function loadFiles() {
+  if (loaded.files) return;
+  loaded.files = true;
+  const [{ uploads }, comparisonData] = await Promise.all([
+    getJSON(`${API}/uploads`),
+    getJSON(`${API}/comparison`),
   ]);
-  renderStats(summary.partner);
-  renderHistory(hist.history);
+
+  const c = comparisonData.comparison;
+  const generated = [
+    { name: 'Count history (CSV)', href: `/download/partner/${encodeURIComponent(PARTNER)}/history.csv`,
+      detail: 'Every collection recorded for this partner' },
+    ...(c && c.ok && c.missing ? [{
+      name: 'Missing records (CSV)', href: `/download/comparison/${c.id}/missing.csv`,
+      detail: `${fmtNum(c.missing)} rows in the spreadsheet with no match in the database`,
+    }] : []),
+    ...(c && c.ok && c.extra ? [{
+      name: 'Extra records (CSV)', href: `/download/comparison/${c.id}/extra.csv`,
+      detail: `${fmtNum(c.extra)} records in the database with no row in the spreadsheet`,
+    }] : []),
+  ];
+
+  document.getElementById('tab-files').innerHTML = `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head"><h2>Generated files</h2>
+        <span class="hint">built on request from current data</span></div>
+      <div class="panel-body" style="display:grid;gap:var(--s2)">
+        ${generated.map((f) => `<div style="display:flex;align-items:center;gap:var(--s3);
+             padding:var(--s2) var(--s3);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${esc(f.name)}</div>
+            <div class="sub">${esc(f.detail)}</div>
+          </div>
+          <a class="btn small" href="${f.href}" download>Download</a>
+        </div>`).join('')}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Uploaded spreadsheets</h2>
+        <span class="hint">${uploads.length} kept</span></div>
+      ${uploads.length ? `<div class="panel-body" style="display:grid;gap:var(--s2)">
+        ${uploads.map((u) => `<div style="display:flex;align-items:center;gap:var(--s3);
+             padding:var(--s2) var(--s3);border:1px solid var(--border);border-radius:var(--radius)">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${esc(u.filename)}</div>
+            <div class="sub">${fmtNum(u.row_count)} rows · ${fmtBytes(u.size_bytes)} ·
+              uploaded ${fmtTime(u.uploaded_at)}</div>
+          </div>
+          <a class="btn small" href="/download/upload/${u.id}" download>Download</a>
+        </div>`).join('')}
+      </div>` : emptyState('No spreadsheets uploaded', 'Upload one on the comparison tab.')}
+    </div>`;
 }
 
-wireRefresh('refresh-one', `/api/partners/${encodeURIComponent(PARTNER)}/refresh`, refresh);
-document.getElementById('legend').innerHTML = statusLegend('history');
-startPolling(refresh, 20000);
+/* --------------------------------------------------------------- tabs */
+
+document.querySelectorAll('.pill[data-tab]').forEach((pill) => {
+  pill.addEventListener('click', () => {
+    document.querySelectorAll('.pill[data-tab]').forEach((p) => p.classList.remove('active'));
+    pill.classList.add('active');
+    const tab = pill.dataset.tab;
+    document.querySelectorAll('.tab-panel').forEach((panel) => {
+      panel.hidden = panel.id !== `tab-${tab}`;
+    });
+    // Each tab's content is fetched the first time it is opened, never before.
+    if (tab === 'history') loadHistory();
+    if (tab === 'files') loadFiles();
+    history.replaceState(null, '', `#${tab}`);
+  });
+});
+
+async function load() {
+  const { partner } = await getJSON(API);
+  PARTNER_ROW = partner;
+  renderTiles(partner);
+  renderIssues(partner);
+}
+
+(async function start() {
+  await load();
+  await loadComparison();
+  // Deep link: the Issues page links to /partners/x#compare.
+  const tab = (location.hash || '#compare').slice(1);
+  const pill = document.querySelector(`.pill[data-tab="${tab}"]`);
+  if (pill) pill.click();
+})();
+
+wireAction('refresh-one', `${API}/refresh`, load, { busy: 'Counting…' });
+startPolling(load, 30000);
 </script>
 {% endblock %}

@@ -1,14 +1,35 @@
 # Ops Dashboard
 
-Web dashboard for partner event ingestion, website health and PM2 processes.
+Web dashboard for partner ingestion, spreadsheet reconciliation, website health
+and PM2 processes.
 
-Three tabs:
+Eight sections in the sidebar:
 
-| Tab | What it shows |
+| Section | What it shows |
 |---|---|
-| **Partners** | Per partner: events in feed vs events in database (future only), the gap between them, and the % still live |
-| **Website Health** | Scheduled up/down checks for each site, with 24h uptime, latency and a recent-checks sparkline |
-| **Processes** | Live PM2 process status per server, fed by `agent.py` |
+| **Dashboard** | Summary only. Headline tiles, then one compact card per partner: name, status, records, last updated, issue count |
+| **Partners** | The full sortable table, and a detail page per partner |
+| **Processes** | PM2 processes, the crontab inventory, and website health |
+| **Issues** | Everything currently wrong, worst first, across all three |
+| **Logs** | The dashboard's own log — search, filter by level/date/status, download |
+| **Downloads** | Every file the dashboard can hand you: exports, logs, uploaded sheets |
+| **Reports** | The management view — health split, worst offenders, printable |
+| **Settings** | What this instance is configured to do, and where to change it |
+
+A **Knowledge Base** slot sits at the bottom of the navigation, disabled and
+marked *Soon*. The sidebar, its active states and its spacing already account
+for it, so building that module later is a new template and a `NAV` entry — not
+a redesign.
+
+## The design rule
+
+**The main dashboard shows a summary and nothing else.** `/api/overview` returns
+eleven fields per partner and no history, no comparison rows and no crontab
+lines. Opening a partner fetches that partner's detail at that moment, which is
+why 112 partners cost the same to display as 12, and why a 113th costs the front
+page nothing.
+
+Everything below is the detail behind that front page.
 
 ## The numbers
 
@@ -42,6 +63,80 @@ WHERE published = '1' AND enddates < CURRENT_DATE AND partner = %s;
 All three live in `queries:` in `config.yaml`, so you can adjust them without
 touching code. `%s` is bound as a parameter — the partner name is never
 formatted into the SQL string.
+
+## Spreadsheet comparison — matching, missing and extra
+
+This is the one thing counts can never answer. `partner_counts` knows we hold
+2,013 rows for bokun and the sheet says 85,000, but **a gap of 82,987 is
+arithmetic, not a comparison**: two sides can hold the same number of records
+and still not hold the same records. Matching / missing / extra require looking
+at the rows.
+
+Upload a partner's `.csv` or `.xlsx` on their page and press compare:
+
+| | |
+|---|---|
+| **Total in spreadsheet** | rows in the uploaded sheet |
+| **Total in database** | records we hold for that partner |
+| **Matching** | present on both sides |
+| **Missing** | in the sheet, with no match in our database |
+| **Extra** | in our database, with no row in the sheet |
+
+Missing and extra are not just counts — the rows themselves are stored, paged,
+searchable, and downloadable as CSV, because "412 missing" is where the question
+starts and the rows are what someone actually works from.
+
+### It picks the match key by measurement, not assumption
+
+A partner sheet might identify a tour by product URL, by an id, or by nothing
+but its name. Rather than requiring the operator to know which, every applicable
+strategy is scored against the real rows and the one that matches most wins:
+
+| Strategy | Strength |
+|---|---|
+| Product URL | exact |
+| Partner ID | exact |
+| Title + start date | strong |
+| Title only | weak |
+
+The chosen strategy and its match rate are shown on the page. A comparison built
+on a weak key says so, rather than quietly reporting thousands of false
+"missing" rows. Below a 10% match rate it is flagged outright as probably
+measuring a column mismatch.
+
+Ids are matched against `partner_url` as well as against each other, because a
+sheet often carries the bare product id (`a-1029384`) while our column carries
+the whole URL ending in it.
+
+### Column names are guessed, never demanded
+
+Partners label the same column `Tour ID`, `product_id` or `Ref`. `sheets.py`
+maps what it finds — punctuation and case stripped, longest pattern first — and
+the UI shows which column became which field, so a wrong guess is caught before
+it becomes a wrong comparison rather than after.
+
+Dates are normalised from Excel serials and thirteen text formats. A date that
+does not parse becomes blank rather than a guess: a date parsed wrong turns a
+matching tour into a missing one, which is worse than an empty cell.
+
+### It refuses rather than truncates
+
+If a partner has more than `app.max_compare_rows` (100,000) records in MySQL, **no
+comparison is produced at all**. A partial diff would report every unread row as
+missing — a wrong answer that looks like a real finding. The query asks for
+`cap + 1` rows precisely so overflow is detected rather than silently hit.
+
+### Reading .xlsx without a dependency
+
+An `.xlsx` is a zip of XML, and a sheet of tour rows uses none of the hard parts,
+so `sheets.py` reads one with `zipfile` + `ElementTree` from the standard
+library rather than adding openpyxl. It handles shared strings, rich-text runs,
+inline strings, date-styled serials, sparse rows and a first sheet that is not
+`sheet1.xml`. Old `.xls` is a different format (a BIFF binary, not a zip) and is
+rejected with a message saying so.
+
+The source file is kept on disk and downloadable, because a disputed "412
+missing" cannot be settled without the sheet it came from.
 
 ### What is NOT yet tracked: partner-side "not inserted"
 
@@ -326,6 +421,37 @@ Set `counts_hourly: false` to go back to a plain interval timer on
 `counts_interval_seconds`. Don't drop that to seconds — these are `COUNT()`
 queries over a large table.
 
+Spreadsheet comparison and logging add:
+
+```yaml
+app:
+  upload_dir: "uploads"       # where partner sheets are kept
+  max_upload_mb: 25           # rejected at the door, before being read
+  max_compare_rows: 100000    # a REFUSAL threshold, not a truncation point
+  log_file: "dashboard.log"   # what the Logs page reads
+  log_level: "INFO"
+```
+
+`max_compare_rows` is the one worth understanding: a partner with more records
+than this produces **no comparison at all**, because a partial read would report
+every unread row as missing. Raise it if you need to compare a very large
+partner, remembering this is a row-by-row read of MySQL rather than a `COUNT()`.
+
+Comparison also needs one query, which is the only one that returns individual
+records:
+
+```yaml
+queries:
+  partner_records: "SELECT id, title, dates, enddates, partner_url, published
+                    FROM jos_eventlist_events WHERE partner = %s ORDER BY id LIMIT %s"
+```
+
+Column **order** is part of the contract — `compare.fetch_db_rows` unpacks it as
+id, title, start, end, url, published. Change the columns if your schema differs,
+but keep the six positions. If the key is missing entirely the rest of the
+dashboard runs normally and the comparison route reports that it is unavailable,
+so an older `config.yaml` will not stop the app from starting.
+
 Secrets come from `.env` (or the environment) and override `config.yaml`:
 `OPS_DB_HOST`, `OPS_DB_PORT`, `OPS_DB_USER`, `OPS_DB_PASSWORD`, `OPS_DB_NAME`.
 
@@ -476,57 +602,213 @@ Host variables are the IP with dots as underscores; `SSH_USER_<host>` and
 for **Python 3.6**, which is what these boxes run, so it avoids `capture_output`
 and `text=` (both 3.7+).
 
+## One definition of "something is wrong"
+
+Before the redesign each page decided for itself what counted as a problem: the
+partners table had its own *Problems only* rule, the jobs page ranked by a
+different one, and the number on a summary tile agreed with neither. Anyone
+reading two pages got two answers.
+
+Everything that can be wrong is now enumerated once, in `issues.py`. The Issues
+page lists these, the partner cards count these, and the overview tiles sum
+these — so a card reading "4 issues" and the four rows you get after clicking it
+are the same four things by construction, not by careful maintenance.
+
+Three severities, because a fourth invites arguments about whether something is
+"medium" and the useful question is only *does this need me now, today, or
+never*:
+
+| | |
+|---|---|
+| **Critical** | query failed, nothing live, ingest job stalled or removed, a large share of the sheet missing |
+| **Warning** | ingest late, half the records never published, extra records in the database |
+| **Info** | never counted, comparison key too weak to trust |
+
+The partner status badge is derived from these rather than from a second set of
+rules, so a card can never read *Success* beside a red issue count.
+
+## Logs
+
+The dashboard's own log, read in the browser: search, filter by level (a floor,
+not an exact match — *Warning* means warnings and worse), by HTTP status class,
+and by date. Downloadable whole, or as a CSV of exactly what the filters
+produced.
+
+Lines are read **backwards from the end of the file**, so a log left running for
+a month opens as fast as a fresh one — cost is set by how much is displayed, not
+by how much has accumulated.
+
+Uvicorn's default output carries no timestamp at all, which makes filtering by
+date impossible, so `applog.configure()` installs a formatter that puts one on
+every future line. The parser reads both formats, so existing logs stay readable
+instead of the page starting empty after the change. An HTTP 5xx is treated as
+an ERROR and a 4xx as a WARNING regardless of the level uvicorn logged it at —
+otherwise a page of 500s reads as INFO and filtering by level hides the one
+thing worth finding.
+
+The file handler is attached to the root logger only, with uvicorn's loggers
+made to propagate up to it. Attaching it to both — the obvious thing, since
+uvicorn configures its own loggers — writes every line twice.
+
+## Tables
+
+Every table in the dashboard is one component (`static/js/table.js`) with sticky
+headers, search, sorting, filters, pagination and expandable rows. State
+survives a re-render, which matters because these pages poll: a naive table
+would throw away your search, sort and page position every few seconds.
+
+### Sticky headers, and why the old ones weren't
+
+The previous version documented giving up on this. Its table wrapper set
+`overflow-x: auto`, which makes the wrapper a scroll container on *both* axes —
+so a sticky `<th>` sticks to the top of that container rather than the viewport,
+and since the container itself scrolled with the page, the header scrolled away
+regardless.
+
+The fix is to let the container own the vertical scroll too: with a `max-height`
+on `.table-scroll` the table scrolls inside it, and `position: sticky; top: 0`
+is then relative to something that is actually standing still. Horizontal
+scrolling still works, and the header scrolls sideways with its columns as it
+should. The first column is sticky on the horizontal axis for the same reason —
+scrolling a wide table right otherwise leaves rows with no idea which partner
+they belong to.
+
+The header's bottom border is a `box-shadow` rather than `border-bottom`,
+because a border on a sticky element is painted at its original position and
+tears away as the body scrolls under it.
+
+Large row sets are paged **server-side** (`RemoteTable`): a partner can produce
+80,000 missing records, and sending them all so the browser can slice out 50
+would be slow to fetch, heavy to hold and pointless to render.
+
 ## HTTP API
 
 Every route below needs the Basic-auth login once `OPS_AUTH_PASSWORD` is set,
-except the two `x-agent-secret` POSTs, which never do.
+except the `x-agent-secret` POSTs, which never do.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/partners` | All partner rows + summary + job status |
-| `GET /api/partners/{name}` | One partner |
+| `GET /api/overview` | The main dashboard: summary + one card per partner |
+| `GET /api/partners` | All partner rows + summary + issue counts |
+| `GET /api/partners/{name}` | One partner, in full |
 | `GET /api/partners/{name}/history` | Count history for a partner |
 | `POST /api/partners/{name}/refresh` | Re-count one partner now |
 | `POST /api/counts/refresh` | Re-count every partner now |
+| `POST /api/partners/{name}/upload` | Upload a spreadsheet (raw body, `X-Filename` header) |
+| `POST /api/partners/{name}/compare` | Diff that sheet against the database |
+| `GET /api/partners/{name}/comparison` | The stored comparison — counts only |
+| `GET /api/comparisons/{id}/rows` | A page of missing/extra rows (`?side=&q=&offset=`) |
+| `DELETE /api/uploads/{id}` | Remove a sheet and everything derived from it |
+| `GET /api/issues` | Every open issue (`?severity=&scope=&kind=&q=`) |
+| `GET /api/logs` | Filtered, paged log lines |
+| `GET /api/logs/files` | Which logs can be read |
+| `GET /api/downloads` | The Downloads catalogue |
+| `GET /api/reports/summary` | The management report |
+| `GET /api/settings` | What this instance is configured to do |
 | `GET /api/sites` | Website health rows + alert status |
 | `POST /api/sites/refresh` | Check sites now (optional `?url=`) |
 | `GET /api/alerts` | Alert config + log of mails sent |
 | `POST /api/alerts/test` | Send a test alert to every recipient |
 | `GET /api/pm2/status` | PM2 state per server |
 | `POST /api/pm2/report` | Agent heartbeat (needs `x-agent-secret`) |
+| `POST /api/cron/report` | Server crontab push (needs `x-agent-secret`) |
 | `GET /api/jobs` | Scheduler state |
 | `GET /api/db/ping` | MySQL connectivity check |
+
+Uploads are sent as the **raw request body** with the filename in a header,
+rather than as a multipart form. Multipart would pull in `python-multipart` — a
+seventh dependency for a single button — and `fetch(url, {body: file})` does
+this natively in the browser, so nothing is lost on the client side.
+
+### Downloads
+
+| Route | Contents |
+|---|---|
+| `/download/partners.csv` | Every partner: counts, job state, cron status, issue count |
+| `/download/issues.csv` | Every open issue |
+| `/download/sites.csv` | Website health |
+| `/download/cron.csv` | The whole crontab inventory |
+| `/download/partner/{name}/history.csv` | One partner's count history |
+| `/download/comparison/{id}/missing.csv` | The rows behind a comparison (also `extra.csv`) |
+| `/download/log/{name}` | A whole log file |
+| `/download/logs.csv` | The log as currently filtered |
+| `/download/upload/{id}` | An uploaded spreadsheet, as it was uploaded |
+
+A requested log name is matched against the known list rather than joined onto a
+directory: a name is user input, and `../../etc/passwd` must not resolve to
+anything.
 
 ## Files
 
 ```
-dashboard.py    FastAPI app, routes, aggregation
+dashboard.py    FastAPI app, routes, aggregation, downloads
 auth.py         HTTP Basic auth middleware (the .htaccess equivalent)
 config.py       config.yaml + .env loading
-config.yaml     partners, queries, websites, intervals
+config.yaml     partners, queries, websites, intervals, upload limits
 mysql.py        read-only MySQL access + the SELECT-only guard
-counts.py       runs both counts for one partner
+counts.py       runs the counts for one partner
+sheets.py       CSV/XLSX reading and column detection, standard library only
+compare.py      spreadsheet vs database diff, and choosing the match key
+issues.py       the one definition of "something is wrong"
+applog.py       log formatting, tail-first reading, filtering
+exports.py      CSV generation for every download
 health.py       one website check
 alerts.py       down/recovery emails (state machine + SMTP)
-scheduler.py    the two background loops
-store.py        SQLite history (ops.db)
+scheduler.py    the background loops
+store.py        SQLite history, uploads and comparisons (ops.db)
 check_db.py     pre-flight connectivity/query check
-agent.py        PM2 reporter, runs on each target server
-templates/      page shells
-static/         CSS + JS
+agent.py        PM2 + crontab reporter, runs on each target server
+
+templates/      one page per file, plus base.html (the shell) and icons/
+static/css/     tokens.css (palette and scale), layout.css, components.css
+static/js/      core.js (helpers, badges, polling, slide-over), table.js
+uploads/        partner spreadsheets, kept so a comparison can be checked
 ```
 
 ## Notes on the UI
 
-- Numbers use Indian grouping (`9,26,934`) with lakh/crore shorthand beneath.
-- The `% still live` bar is a **single hue** — it encodes magnitude, and the
-  number beside it does the precise work.
-- Status badges always carry a text label *and* a glyph, never colour alone:
-  the green/red pair is hard to separate for deuteranopic readers, so colour
-  only reinforces a label that already says what the state is. All
-  foreground/background pairs measure at 4.5:1 or better.
-- The **Problems only** toggle filters to partners where the query failed, the
-  count is missing, nothing is live, or under half the events are still live.
+The whole palette and scale live in `static/css/tokens.css`. Light surfaces,
+two border weights, one accent hue, and no gradients or heavy shadows — depth is
+carried by borders, and shadow is kept for things that genuinely float (the
+slide-over, a toast).
+
+- **Colour never carries meaning alone.** Every status badge has a text label
+  *and* a glyph, because green and red sit close together for the ~8% of men
+  with deuteranopia. Colour only reinforces a label that already says what the
+  state is. Text pairs measure 4.5:1 or better, badge pairs 7:1 or better.
+- **A meter is one hue.** It encodes magnitude, not state; a red/amber/green bar
+  would say "bad" about a number that is merely small. The figure beside it does
+  the precise work.
+- **The comparison bar is the exception**, and deliberately: matching / missing /
+  extra are a composition that adds up to the whole sheet, and they do map onto
+  how much attention each deserves. Below ~6% a segment drops its label rather
+  than squeezing it, because the legend underneath carries every number anyway.
+- **Tiles tint the figure, not the tile.** A wall of coloured blocks is harder to
+  read at a glance than one coloured number among plain ones.
+- Numbers use Indian grouping (`9,26,934`) with lakh/crore shorthand beneath,
+  and tabular numerals everywhere, so columns align and a live-updating figure
+  does not jitter.
+- **The status legend is printed, not just hovered.** A tooltip is invisible on
+  a touch screen and unfindable if you don't know to hover, so the same wording
+  exists in a collapsible legend under the table it belongs to. Both come from
+  one definition in `core.js`.
+- The overview sorts **worst first** by default. On a page meant to answer "who
+  needs me?" in a few seconds, alphabetical order buries the answer somewhere
+  around letter M.
+- Polling **pauses while the tab is hidden**. This is the page people leave open
+  all day; a background tab polling every 5s is thousands of pointless requests.
+  It catches up immediately on return.
+- Responsive: the sidebar becomes an overlay below 1080px, tiles go two-up below
+  720px and one-up below 480px, and wide tables scroll inside their own
+  container so the page body never scrolls sideways.
+
+### Settings is read-only, on purpose
+
+`config.yaml` and `.env` are the record of how an instance is configured. A
+settings page that could write them would put the running process and the file
+it was loaded from permanently out of step — and the file is what survives a
+restart, gets committed, and gets copied to the next server. So the page shows
+what is in force, the SQL behind every number, and where to change it.
 
 ### Filling it from the Monday sheet
 

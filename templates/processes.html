@@ -1,129 +1,265 @@
 {% extends "base.html" %}
-{% block title %}Processes · Ops Dashboard{% endblock %}
+{% block title %}Processes · Ops{% endblock %}
+{% block heading %}Processes{% endblock %}
 
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>PM2 processes</h1>
-    <p>
-      Live from <span class="mono">agent.py</span> running on each server. A server
-      shows as offline when no heartbeat has arrived within the stale window —
-      that usually means the agent stopped, not that the box is down.
-    </p>
+{#
+  Three things that are all "is the machinery running": PM2 processes, the
+  crontab inventory, and website health. One nav item because the navigation
+  was asked to stay simple; three tabs because they are genuinely separate
+  tables and only the open one is ever built.
+#}
+
+<div class="tiles" id="tiles"></div>
+
+<div class="section">
+  <div class="toolbar" style="border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)">
+    <button class="pill active" data-tab="pm2">PM2 processes</button>
+    <button class="pill" data-tab="cron">Cron jobs <span class="n" id="n-cron"></span></button>
+    <button class="pill" data-tab="sites">Website health <span class="n" id="n-sites"></span></button>
+    <span class="spacer"></span>
+    <span class="muted" id="job-line"></span>
   </div>
 </div>
 
-<div class="stat-row" id="stats"></div>
-
-<div class="panel">
-  <h2>
-    <span>Processes by server</span>
-    <span class="hint" id="stale-hint"></span>
-  </h2>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Server</th>
-          <th>Process</th>
-          <th>Status</th>
-          <th class="num">CPU</th>
-          <th class="num">Memory</th>
-          <th class="num">Restarts</th>
-          <th>Uptime</th>
-        </tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
-  <div id="legend"></div>
-</div>
+<section id="tab-pm2" class="tab-panel"></section>
+<section id="tab-cron" class="tab-panel" hidden><div id="cron-table"></div></section>
+<section id="tab-sites" class="tab-panel" hidden><div id="sites-notice"></div><div id="sites-table"></div></section>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function uptimeFrom(ms) {
-  if (!ms) return '—';
-  const secs = Math.max(0, Date.now() / 1000 - ms / 1000);
-  if (secs < 3600) return `${Math.round(secs / 60)}m`;
-  if (secs < 86400) return `${Math.round(secs / 3600)}h`;
-  return `${Math.round(secs / 86400)}d`;
-}
+const loaded = { cron: false, sites: false };
+let cronTable = null;
+let sitesTable = null;
 
-function procBadge(status) {
-  if (status === 'online') return badge('up', 'ONLINE', 'processes');
-  if (status === 'errored') return badge('down', String(status).toUpperCase(), 'processes');
-  // Every other PM2 word - stopped, launching, stopping - shares one
-  // explanation, looked up by the catch-all row rather than by label.
-  return badge('warn', String(status || 'unknown').toUpperCase(), null,
-               statusHelp('processes', 'STOPPED / LAUNCHING / …'));
-}
+/* ---------------------------------------------------------------- PM2 */
 
-function renderStats(servers) {
-  const procs = servers.flatMap((s) => s.processes);
-  const tiles = [
-    { label: 'Servers reporting', value: servers.length, sub: 'agents sending heartbeats' },
-    { label: 'Servers offline', value: servers.filter((s) => s.stale).length,
-      sub: 'no recent heartbeat',
-      cls: servers.some((s) => s.stale) ? 'is-bad' : '' },
-    { label: 'Processes', value: procs.length, sub: 'across all servers' },
-    { label: 'Online', value: procs.filter((p) => p.status === 'online').length,
-      sub: 'running normally', cls: 'is-good' },
-    { label: 'Errored', value: procs.filter((p) => p.status === 'errored').length,
-      sub: 'need attention',
-      cls: procs.some((p) => p.status === 'errored') ? 'is-bad' : '' },
-  ];
-  document.getElementById('stats').innerHTML = tiles.map((t) => `
-    <div class="stat ${t.cls || ''}">
-      <div class="label">${t.label}</div>
-      <div class="value">${t.value}</div>
-      <div class="sub">${t.sub}</div>
-    </div>`).join('');
-}
-
-async function refresh() {
-  const data = await getJSON('/api/pm2/status');
-  renderStats(data.servers);
-  document.getElementById('stale-hint').textContent =
-    `offline after ${data.stale_after_seconds}s without a heartbeat`;
-
+/* Grouped by server rather than a flat process list: a process name means
+ * nothing without the box it runs on, and a whole server going quiet is one
+ * fact, not fifteen separate ones. */
+function renderPM2(data) {
+  const el = document.getElementById('tab-pm2');
   if (!data.servers.length) {
-    document.getElementById('tbody').innerHTML =
-      `<tr><td colspan="7" class="empty">
-        No agents reporting yet. Run <span class="mono">agent.py</span> on a server
-        with SERVER_ID set and point it at this dashboard.
-      </td></tr>`;
+    el.innerHTML = `<div class="panel"><div class="panel-body">${emptyState(
+      'No server is reporting',
+      'agent.py posts a heartbeat every 5s. See the README for deploying it.')}</div></div>`;
     return;
   }
 
-  const rows = [];
-  data.servers.forEach((srv) => {
-    const header = `${esc(srv.server_id)} ${srv.stale
-      ? badge('down', 'OFFLINE', 'processes')
-      : badge('up', 'LIVE', 'processes')}`;
-
-    if (!srv.processes.length) {
-      rows.push(`<tr><td class="name">${header}</td>
-        <td colspan="6" class="muted">No processes reported</td></tr>`);
-      return;
-    }
-    srv.processes.forEach((p, i) => {
-      rows.push(`<tr>
-        <td class="name">${i === 0 ? header : ''}
-          ${i === 0 ? `<div class="muted" style="font-weight:400;font-size:0.72rem">seen ${timeAgo(srv.last_updated)}</div>` : ''}</td>
-        <td>${esc(p.name)} <span class="chip">id ${p.id}</span></td>
-        <td>${procBadge(p.status)}</td>
-        <td class="num">${p.cpu ?? 0}%</td>
-        <td class="num">${p.memory ?? 0} MB</td>
-        <td class="num">${p.restarts ?? 0}</td>
-        <td class="muted">${uptimeFrom(p.uptime)}</td>
-      </tr>`);
-    });
-  });
-  document.getElementById('tbody').innerHTML = rows.join('');
+  el.innerHTML = data.servers.map((s) => `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head">
+        <h2 style="display:flex;align-items:center;gap:var(--s2)">
+          <span class="mono">${esc(s.server_id)}</span>
+          ${s.stale ? badge('bad', 'OFFLINE', 'processes') : badge('ok', 'LIVE', 'processes')}
+        </h2>
+        <span class="hint">
+          ${fmtNum(s.online_count)} online${s.errored_count
+            ? ` · <span style="color:var(--bad)">${s.errored_count} errored</span>` : ''}
+          of ${fmtNum(s.total_count)} · heartbeat ${s.age_seconds}s ago
+        </span>
+      </div>
+      <div class="table-scroll" style="--table-max-h:none">
+        <table>
+          <thead><tr>
+            <th class="sticky-col">Process</th><th>Status</th><th class="num">CPU</th>
+            <th class="num">Memory</th><th class="num">Restarts</th>
+          </tr></thead>
+          <tbody>
+            ${s.processes.length ? s.processes.map((p) => `<tr>
+              <td class="sticky-col name">${esc(p.name)}</td>
+              <td>${p.status === 'online' ? badge('ok', 'ONLINE', 'processes')
+                : p.status === 'errored' ? badge('bad', 'ERRORED', 'processes')
+                : badge('warn', String(p.status || 'unknown').toUpperCase(), 'processes',
+                        "PM2 reports this process in its own words.")}</td>
+              <td class="num">${p.cpu ?? 0}%</td>
+              <td class="num">${p.memory ? fmtBytes(p.memory) : '—'}</td>
+              <td class="num">${fmtNum(p.restarts ?? 0)}</td>
+            </tr>`).join('')
+            : `<tr><td colspan="5">${emptyState('No processes', 'PM2 reports nothing running here.')}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>`).join('') + statusLegend('processes');
 }
 
-document.getElementById('legend').innerHTML = statusLegend('processes', 'What these statuses mean — server, then process');
-startPolling(refresh, 5000);
+/* --------------------------------------------------------------- cron */
+
+async function loadCron() {
+  if (loaded.cron) return;
+  loaded.cron = true;
+  const data = await getJSON('/api/cron');
+
+  cronTable = new DataTable('#cron-table', {
+    title: 'Crontab inventory',
+    hint: `${fmtNum(data.summary.total)} lines from ${data.summary.servers} servers ·
+           ${fmtNum(data.summary.disabled)} commented out`,
+    rows: data.jobs,
+    searchKeys: ['name', 'command', 'partner', 'server', 'schedule_human'],
+    searchPlaceholder: 'Search jobs, paths or partners…',
+    exportHref: '/download/cron.csv',
+    pageSize: 50,
+    maxHeight: '62vh',
+    sort: { key: 'server', dir: 'asc' },
+    emptyTitle: 'No crontabs collected',
+    emptyDetail: 'Each server pushes its own crontab every 6 hours.',
+    legend: statusLegend('cron'),
+    chips: [
+      { key: 'disabled', label: 'Commented out', test: (r) => !!r.disabled },
+      { key: 'stale-log', label: 'Log over 30d old', test: (r) => r.log_age_days > 30 },
+      { key: 'no-log', label: 'No log redirect', test: (r) => !r.log_file },
+    ],
+    filters: [
+      { key: 'server', label: 'Server',
+        options: data.servers.map((s) => ({ value: s.server, label: `${s.server} (${s.jobs})` })) },
+    ],
+    // The full command is long enough that truncating it into a column makes it
+    // useless, so it lives in the expanded row where it can wrap.
+    expand: (r) => `<dl class="detail-grid">
+        <div style="grid-column:1/-1"><dt>Full command</dt>
+          <dd class="mono" style="white-space:pre-wrap">${esc(r.command)}</dd></div>
+        <div><dt>Schedule</dt><dd class="mono">${esc(r.schedule || '—')}</dd></div>
+        <div><dt>In plain English</dt><dd>${esc(r.schedule_human || '—')}</dd></div>
+        <div><dt>Script</dt><dd class="mono">${esc(r.script || '—')}</dd></div>
+        <div><dt>Log file</dt><dd class="mono">${esc(r.log_file || 'no redirect')}</dd></div>
+        <div><dt>Log last written</dt><dd>${r.log_mtime
+          ? `${fmtTime(r.log_mtime)} (${r.log_age_days}d ago)` : '—'}</dd></div>
+        <div><dt>Log size</dt><dd>${r.log_size !== null && r.log_size !== undefined
+          ? (r.log_size === 0 ? '<span style="color:var(--warn)">empty</span>' : fmtBytes(r.log_size))
+          : '—'}</dd></div>
+      </dl>`,
+    columns: [
+      { key: 'name', label: 'Job', sticky: true, sortDefault: 'asc',
+        render: (r) => `<span style="font-weight:600">${esc(r.name || '—')}</span>` },
+      { key: 'server', label: 'Server', sortDefault: 'asc',
+        render: (r) => `<span class="chip">${esc(r.server)}</span>` },
+      { key: 'schedule_human', label: 'Runs', sortDefault: 'asc',
+        render: (r) => esc(r.schedule_human || r.schedule || '—') },
+      { key: 'partner', label: 'Partner', sortDefault: 'asc',
+        render: (r) => (r.partner
+          ? `<a href="/partners/${encodeURIComponent(r.partner)}">${esc(r.partner)}</a>`
+          : '<span class="muted">—</span>') },
+      { key: 'log_age_days', label: 'Last output', num: true,
+        render: (r) => {
+          if (!r.log_file) return '<span class="muted" title="This line has no redirect, so nothing can be inferred">no log</span>';
+          if (r.log_mtime === null || r.log_mtime === undefined) return '<span class="muted">—</span>';
+          const stale = r.log_age_days > 30;
+          return `<span${stale ? ' style="color:var(--warn);font-weight:600"' : ''}>${r.log_age_days}d ago</span>
+            ${r.log_size === 0 ? '<div class="sub" style="color:var(--warn)">empty</div>' : ''}`;
+        } },
+      { key: 'disabled', label: 'Status',
+        render: (r) => (r.disabled ? badge('idle', 'DISABLED', 'cron') : badge('ok', 'ACTIVE', 'cron')) },
+    ],
+  });
+}
+
+/* -------------------------------------------------------------- sites */
+
+async function loadSites() {
+  if (loaded.sites) return;
+  loaded.sites = true;
+  const data = await getJSON('/api/sites');
+
+  if (!data.checks_enabled) {
+    document.getElementById('sites-notice').innerHTML =
+      `<div class="notice info" style="margin-bottom:var(--s4)"><div class="body">
+         <strong>Active checking is turned off.</strong> Nothing here requests these
+         URLs — the rows below are the last stored result, and PM2 is the live
+         signal. Set <span class="mono">health_checks_enabled: true</span> in
+         config.yaml to resume polling.</div></div>`;
+  }
+
+  sitesTable = new DataTable('#sites-table', {
+    title: 'Website health',
+    hint: data.alerts && data.alerts.ready
+      ? 'email alerts configured'
+      : 'email alerts not configured',
+    rows: data.sites,
+    searchKeys: ['name', 'url'],
+    searchPlaceholder: 'Search sites…',
+    exportHref: '/download/sites.csv',
+    paginate: false,
+    maxHeight: 'none',
+    emptyTitle: 'No sites configured',
+    legend: statusLegend('sites'),
+    columns: [
+      { key: 'name', label: 'Site', sticky: true, sortDefault: 'asc',
+        render: (r) => `<span style="font-weight:600">${esc(r.name)}</span>
+          <div class="sub">${esc(r.url)}</div>` },
+      { key: 'ok', label: 'Status', sortDefault: 'asc',
+        render: (r) => (r.ok === null ? badge('idle', 'NOT CHECKED', 'sites')
+          : r.ok ? badge('ok', 'UP', 'sites') : badge('bad', 'DOWN', 'sites'))
+          + (r.error ? `<div class="err" style="max-width:36ch;white-space:normal">${esc(r.error)}</div>` : '') },
+      { key: 'status_code', label: 'HTTP', num: true,
+        render: (r) => `${r.status_code ?? '—'}<div class="sub">want ${
+          Array.isArray(r.expect_status) ? r.expect_status.join(' or ') : r.expect_status}</div>` },
+      { key: 'latency_ms', label: 'Latency', num: true,
+        render: (r) => (r.latency_ms ? `${fmtNum(r.latency_ms)} ms` : '—') },
+      { key: 'uptime_24h', label: 'Uptime 24h', render: (r) => meter(r.uptime_24h) },
+      { key: 'checks_24h', label: 'Checks 24h', num: true, render: (r) => fmtNum(r.checks_24h) },
+      { key: 'checked_at', label: 'Checked',
+        render: (r) => `<span class="muted" title="${esc(fmtTime(r.checked_at))}">${timeAgo(r.checked_at)}</span>` },
+    ],
+  });
+}
+
+/* --------------------------------------------------------------- page */
+
+function renderTiles(pm2, cronSummary, siteRows) {
+  const errored = pm2.servers.reduce((n, s) => n + s.errored_count, 0);
+  const stale = pm2.servers.filter((s) => s.stale).length;
+  const down = siteRows.filter((s) => s.ok === false).length;
+  document.getElementById('tiles').innerHTML = tiles([
+    { label: 'Servers reporting', value: fmtNum(pm2.servers.length),
+      sub: stale ? `${stale} offline` : 'all sending heartbeats',
+      cls: stale ? 'is-bad' : 'is-ok' },
+    { label: 'Processes online', value: fmtNum(pm2.servers.reduce((n, s) => n + s.online_count, 0)),
+      sub: `of ${fmtNum(pm2.servers.reduce((n, s) => n + s.total_count, 0))} known` },
+    { label: 'Processes errored', value: fmtNum(errored),
+      sub: errored ? 'crashed or failed to start' : 'none',
+      cls: errored ? 'is-bad' : 'is-ok' },
+    { label: 'Cron jobs', value: fmtNum(cronSummary.total),
+      sub: `${fmtNum(cronSummary.disabled)} commented out · ${cronSummary.servers} servers` },
+    { label: 'Sites down', value: fmtNum(down),
+      sub: `of ${fmtNum(siteRows.length)} monitored`,
+      cls: down ? 'is-bad' : 'is-ok' },
+  ]);
+  document.getElementById('n-cron').textContent = cronSummary.total || '';
+  document.getElementById('n-sites').textContent = down || '';
+}
+
+document.querySelectorAll('.pill[data-tab]').forEach((pill) => {
+  pill.addEventListener('click', () => {
+    document.querySelectorAll('.pill[data-tab]').forEach((p) => p.classList.remove('active'));
+    pill.classList.add('active');
+    const tab = pill.dataset.tab;
+    document.querySelectorAll('.tab-panel').forEach((panel) => {
+      panel.hidden = panel.id !== `tab-${tab}`;
+    });
+    if (tab === 'cron') loadCron();
+    if (tab === 'sites') loadSites();
+    history.replaceState(null, '', `#${tab}`);
+  });
+});
+
+async function refresh() {
+  const [pm2, cron, sites] = await Promise.all([
+    getJSON('/api/pm2/status'),
+    getJSON('/api/cron'),
+    getJSON('/api/sites'),
+  ]);
+  renderPM2(pm2);
+  renderTiles(pm2, cron.summary, sites.sites);
+  document.getElementById('job-line').innerHTML = jobLine(cron.job);
+  if (loaded.cron && cronTable) cronTable.setRows(cron.jobs);
+  if (loaded.sites && sitesTable) sitesTable.setRows(sites.sites);
+}
+
+startPolling(refresh, 10000);
+
+const initial = (location.hash || '#pm2').slice(1);
+const initialPill = document.querySelector(`.pill[data-tab="${initial}"]`);
+if (initialPill) initialPill.click();
 </script>
 {% endblock %}

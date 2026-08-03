@@ -4,6 +4,7 @@ This is the dashboard's own database - the partner MySQL is never written to.
 A fresh connection is opened per operation (cheap for SQLite) so the store is
 safe to use from the scheduler's threads and from request handlers.
 """
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -61,6 +62,80 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
     collected_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cron_server ON cron_jobs (server, line_no);
+
+-- An uploaded partner spreadsheet. The file itself is kept on disk (see
+-- `stored_path`) so it can be downloaded back later - the source of a
+-- comparison has to be retrievable, or a disputed result cannot be settled.
+CREATE TABLE IF NOT EXISTS sheet_uploads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    partner      TEXT NOT NULL,
+    filename     TEXT NOT NULL,      -- what the user called it
+    stored_path  TEXT,               -- where we put it
+    size_bytes   INTEGER,
+    row_count    INTEGER,
+    headers      TEXT,               -- JSON: the sheet's own column names
+    mapping      TEXT,               -- JSON: canonical field -> column used
+    uploaded_at  REAL NOT NULL,
+    note         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_upload_partner
+    ON sheet_uploads (partner, uploaded_at DESC);
+
+-- The normalised rows of one upload. Kept rather than recomputed so a
+-- comparison can be re-run against fresh database counts without asking the
+-- user to upload the same file again.
+CREATE TABLE IF NOT EXISTS sheet_rows (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    upload_id   INTEGER NOT NULL,
+    external_id TEXT,
+    title       TEXT,
+    start_date  TEXT,
+    end_date    TEXT,
+    venue       TEXT,
+    url         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sheet_rows_upload ON sheet_rows (upload_id);
+
+-- The outcome of diffing one upload against the database.
+CREATE TABLE IF NOT EXISTS comparisons (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    partner      TEXT NOT NULL,
+    upload_id    INTEGER,
+    sheet_total  INTEGER,
+    db_total     INTEGER,
+    matching     INTEGER,
+    missing      INTEGER,
+    extra        INTEGER,
+    strategy     TEXT,               -- which key tied the two sides together
+    strategy_label TEXT,
+    match_rate   REAL,
+    reliable     INTEGER,            -- 0 when the match rate is too low to trust
+    sheet_duplicates INTEGER,
+    db_duplicates    INTEGER,
+    ok           INTEGER NOT NULL DEFAULT 1,
+    error        TEXT,
+    duration_ms  INTEGER,
+    computed_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_comparison_partner
+    ON comparisons (partner, computed_at DESC);
+
+-- The rows behind the missing/extra counts. A number tells you there is a
+-- problem; these are what someone actually works from, and what the CSV
+-- download serves.
+CREATE TABLE IF NOT EXISTS comparison_rows (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    comparison_id INTEGER NOT NULL,
+    side          TEXT NOT NULL,     -- missing (in sheet only) | extra (in db only)
+    title         TEXT,
+    external_id   TEXT,
+    start_date    TEXT,
+    end_date      TEXT,
+    venue         TEXT,
+    url           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_comparison_rows
+    ON comparison_rows (comparison_id, side);
 
 CREATE TABLE IF NOT EXISTS site_checks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,6 +361,208 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------- spreadsheet comparison
+
+    # How many missing/extra rows are kept per comparison. The counts are always
+    # exact; only the row listing is capped, and `rows_truncated` records when
+    # it was - a silently short CSV would be worse than a stated limit.
+    MAX_STORED_ROWS = 100_000
+
+    def record_upload(
+        self,
+        partner: str,
+        filename: str,
+        stored_path: Optional[str],
+        size_bytes: int,
+        rows: List[Dict[str, Any]],
+        headers: List[str],
+        mapping: Dict[str, Any],
+        note: Optional[str] = None,
+    ) -> int:
+        """Store an uploaded sheet and its normalised rows. Returns the upload id."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO sheet_uploads
+                   (partner, filename, stored_path, size_bytes, row_count,
+                    headers, mapping, uploaded_at, note)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (partner, filename, stored_path, size_bytes, len(rows),
+                 json.dumps(headers), json.dumps(mapping), time.time(), note),
+            )
+            upload_id = cursor.lastrowid
+            conn.executemany(
+                """INSERT INTO sheet_rows
+                   (upload_id, external_id, title, start_date, end_date, venue, url)
+                   VALUES (?,?,?,?,?,?,?)""",
+                [(upload_id, r.get("external_id"), r.get("title"),
+                  r.get("start_date"), r.get("end_date"), r.get("venue"), r.get("url"))
+                 for r in rows],
+            )
+        return upload_id
+
+    def uploads(self, partner: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM sheet_uploads"
+        params: tuple = ()
+        if partner:
+            sql += " WHERE partner = ?"
+            params = (partner,)
+        sql += " ORDER BY id DESC LIMIT ?"
+        with self._conn() as conn:
+            rows = conn.execute(sql, params + (limit,)).fetchall()
+        return [self._decode_upload(dict(r)) for r in rows]
+
+    def upload(self, upload_id: int) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM sheet_uploads WHERE id = ?", (upload_id,)
+            ).fetchone()
+        return self._decode_upload(dict(row)) if row else None
+
+    def latest_upload(self, partner: str) -> Optional[Dict[str, Any]]:
+        found = self.uploads(partner, limit=1)
+        return found[0] if found else None
+
+    @staticmethod
+    def _decode_upload(row: Dict[str, Any]) -> Dict[str, Any]:
+        """JSON columns back into structures, tolerating rows written by hand."""
+        for key in ("headers", "mapping"):
+            try:
+                row[key] = json.loads(row[key]) if row.get(key) else None
+            except (TypeError, ValueError):
+                row[key] = None
+        return row
+
+    def sheet_rows(self, upload_id: int) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sheet_rows WHERE upload_id = ? ORDER BY id", (upload_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_upload(self, upload_id: int) -> None:
+        """Remove a sheet and everything derived from it.
+
+        Comparisons go too: a comparison whose source sheet no longer exists
+        cannot be re-run or checked, so keeping it would leave a number on the
+        page that nobody can account for.
+        """
+        with self._conn() as conn:
+            comparison_ids = [
+                r["id"] for r in conn.execute(
+                    "SELECT id FROM comparisons WHERE upload_id = ?", (upload_id,)
+                )
+            ]
+            for comparison_id in comparison_ids:
+                conn.execute(
+                    "DELETE FROM comparison_rows WHERE comparison_id = ?", (comparison_id,)
+                )
+            conn.execute("DELETE FROM comparisons WHERE upload_id = ?", (upload_id,))
+            conn.execute("DELETE FROM sheet_rows WHERE upload_id = ?", (upload_id,))
+            conn.execute("DELETE FROM sheet_uploads WHERE id = ?", (upload_id,))
+
+    def record_comparison(
+        self, partner: str, upload_id: Optional[int], result: Dict[str, Any]
+    ) -> int:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO comparisons
+                   (partner, upload_id, sheet_total, db_total, matching, missing,
+                    extra, strategy, strategy_label, match_rate, reliable,
+                    sheet_duplicates, db_duplicates, ok, error, duration_ms,
+                    computed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (partner, upload_id, result.get("sheet_total"), result.get("db_total"),
+                 result.get("matching"), result.get("missing"), result.get("extra"),
+                 result.get("strategy"), result.get("strategy_label"),
+                 result.get("match_rate"),
+                 1 if result.get("reliable") else 0,
+                 result.get("sheet_duplicates"), result.get("db_duplicates"),
+                 1 if result.get("ok") else 0, result.get("error"),
+                 result.get("duration_ms"), time.time()),
+            )
+            comparison_id = cursor.lastrowid
+
+            for side in ("missing", "extra"):
+                rows = (result.get(f"{side}_rows") or [])[: self.MAX_STORED_ROWS]
+                conn.executemany(
+                    """INSERT INTO comparison_rows
+                       (comparison_id, side, title, external_id, start_date,
+                        end_date, venue, url)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    [(comparison_id, side, r.get("title"), r.get("external_id"),
+                      r.get("start_date"), r.get("end_date"), r.get("venue"),
+                      r.get("url")) for r in rows],
+                )
+        return comparison_id
+
+    def latest_comparisons(self) -> Dict[str, Dict[str, Any]]:
+        """Newest successful comparison per partner, for the cards and issues."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT c.* FROM comparisons c
+                   JOIN (
+                       SELECT partner, MAX(id) AS max_id
+                       FROM comparisons WHERE ok = 1 GROUP BY partner
+                   ) m ON m.max_id = c.id"""
+            ).fetchall()
+        return {r["partner"]: dict(r) for r in rows}
+
+    def latest_comparison(self, partner: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM comparisons WHERE partner = ? ORDER BY id DESC LIMIT 1",
+                (partner,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def comparison(self, comparison_id: int) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM comparisons WHERE id = ?", (comparison_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def comparison_history(self, partner: str, limit: int = 30) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM comparisons WHERE partner = ? ORDER BY id DESC LIMIT ?",
+                (partner, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def comparison_rows(
+        self, comparison_id: int, side: str, query: str = "",
+        offset: int = 0, limit: int = 50,
+    ) -> Dict[str, Any]:
+        """One page of missing or extra rows, with the total for the pager."""
+        where = "comparison_id = ? AND side = ?"
+        params: List[Any] = [comparison_id, side]
+        if query.strip():
+            where += " AND (title LIKE ? OR external_id LIKE ? OR venue LIKE ? OR url LIKE ?)"
+            params += [f"%{query.strip()}%"] * 4
+
+        with self._conn() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) AS n FROM comparison_rows WHERE {where}", params
+            ).fetchone()["n"]
+            rows = conn.execute(
+                f"""SELECT * FROM comparison_rows WHERE {where}
+                    ORDER BY start_date IS NULL, start_date, id
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+        return {"rows": [dict(r) for r in rows], "total": total}
+
+    def all_comparison_rows(self, comparison_id: int, side: str) -> List[Dict[str, Any]]:
+        """Every stored row on one side - the CSV download, unpaginated."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM comparison_rows WHERE comparison_id = ? AND side = ?
+                   ORDER BY start_date IS NULL, start_date, id""",
+                (comparison_id, side),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ------------------------------------------------------------ site checks
 
     def record_check(
@@ -389,3 +666,22 @@ class Store:
             # site_alert_state is deliberately not pruned - it is one row per
             # site and losing it would re-send alerts for ongoing outages.
             conn.execute("DELETE FROM alert_log WHERE sent_at < ?", (cutoff,))
+
+            # Superseded comparisons and their rows. The newest per partner is
+            # always kept regardless of age: it is what the partner card and the
+            # issue list read, and an old comparison is still the only answer
+            # available until someone uploads a fresher sheet.
+            stale = [
+                r["id"] for r in conn.execute(
+                    """SELECT id FROM comparisons
+                       WHERE computed_at < ? AND id NOT IN (
+                           SELECT MAX(id) FROM comparisons GROUP BY partner
+                       )""",
+                    (cutoff,),
+                )
+            ]
+            for comparison_id in stale:
+                conn.execute(
+                    "DELETE FROM comparison_rows WHERE comparison_id = ?", (comparison_id,)
+                )
+                conn.execute("DELETE FROM comparisons WHERE id = ?", (comparison_id,))

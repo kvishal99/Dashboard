@@ -1,0 +1,319 @@
+/* The application shell: sidebar, top bar, page container.
+ *
+ * The layout is a two-column grid rather than a floated or fixed sidebar, so
+ * the main column's width is computed rather than guessed - which is what lets
+ * a wide table know how much room it actually has.
+ *
+ * Breakpoints, and what changes at each:
+ *   > 1080px   sidebar always visible, full page padding
+ *   <= 1080px  sidebar slides over the content, opened by the menu button
+ *   <= 720px   tiles go one-up, tables scroll horizontally, filters stack
+ */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* ------------------------------------------------------------- sidebar */
+
+.sidebar {
+  grid-column: 1;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 40;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: var(--topbar-h);
+  padding: 0 var(--s4);
+  border-bottom: 1px solid var(--border);
+  font-weight: 650;
+  font-size: var(--text-md);
+  color: var(--text);
+  flex-shrink: 0;
+}
+.sidebar-brand:hover { text-decoration: none; }
+.sidebar-brand .mark {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--inverse);
+  display: grid;
+  place-items: center;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.sidebar-nav {
+  padding: var(--s3) var(--s2);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: var(--text-md);
+  font-weight: 500;
+  margin-bottom: 2px;
+  transition: background var(--transition), color var(--transition);
+}
+.nav-item:hover {
+  background: var(--surface-3);
+  color: var(--text);
+  text-decoration: none;
+}
+.nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.nav-item .icon { flex-shrink: 0; opacity: 0.85; }
+.nav-item .label { flex: 1; }
+
+/* A section that exists in the navigation but is not built yet. Shown rather
+ * than hidden so the shape of the app is honest about where it is going, and
+ * greyed with a note so nobody clicks it twice. */
+.nav-item.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.nav-item .soon {
+  font-size: 0.625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--idle-fill);
+  color: var(--idle);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+/* The issue count beside "Issues". Only rendered when it is non-zero - a badge
+ * reading 0 is noise that trains people to stop reading badges. */
+.nav-item .count {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--bad-fill);
+  color: var(--bad);
+  min-width: 20px;
+  text-align: center;
+}
+.nav-item .count.is-warn { background: var(--warn-fill); color: var(--warn); }
+
+.nav-divider {
+  height: 1px;
+  background: var(--border);
+  margin: var(--s3) var(--s3);
+}
+.nav-heading {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--subtle);
+  font-weight: 600;
+  padding: var(--s3) var(--s3) var(--s2);
+}
+
+.sidebar-foot {
+  padding: var(--s3) var(--s4);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--subtle);
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------- main */
+
+.main {
+  grid-column: 2;
+  min-width: 0;              /* lets a wide table scroll instead of stretching */
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  height: var(--topbar-h);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 0 var(--s6);
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  flex-shrink: 0;
+}
+.topbar h1 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-size: var(--text-sm);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.menu-btn {
+  display: none;
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 6px;
+  cursor: pointer;
+  color: var(--muted);
+  line-height: 0;
+}
+
+.page {
+  padding: var(--s6);
+  max-width: var(--page-max);
+  width: 100%;
+  flex: 1;
+}
+
+.page-intro {
+  margin-bottom: var(--s5);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s4);
+  flex-wrap: wrap;
+}
+.page-intro p {
+  margin: var(--s1) 0 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+  max-width: 74ch;
+}
+
+.section {
+  margin-bottom: var(--s7);
+}
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+  flex-wrap: wrap;
+}
+.section-head h2 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.section-head .hint {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* -------------------------------------------------------------- grids */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s3);
+  margin-bottom: var(--s5);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--s3);
+}
+
+.split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: var(--s4);
+}
+
+/* --------------------------------------------------------- responsive */
+
+/* The sidebar becomes an overlay. It keeps its own scroll and traps nothing -
+ * the scrim behind it closes it, as does Escape. */
+@media (max-width: 1080px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    transform: translateX(-100%);
+    transition: transform var(--transition);
+    box-shadow: var(--shadow-md);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .main { grid-column: 1; }
+  .menu-btn { display: block; }
+
+  .scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(16, 24, 40, 0.35);
+    z-index: 35;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--transition);
+  }
+  .scrim.show { opacity: 1; pointer-events: auto; }
+}
+
+@media (max-width: 720px) {
+  .page { padding: var(--s4); }
+  .topbar { padding: 0 var(--s4); }
+  .tiles { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--s2); }
+  .cards { grid-template-columns: 1fr; }
+  .page-intro { flex-direction: column; }
+  .topbar h1 { font-size: var(--text-md); }
+}
+
+@media (max-width: 560px) {
+  /* The page title is the one thing that must stay readable in the top bar, so
+   * the poll timestamp - which is reassurance, not information - gives up its
+   * space first rather than truncating the heading to "Dashbo…". */
+  #last-poll { display: none; }
+}
+
+@media (max-width: 480px) {
+  .tiles { grid-template-columns: 1fr 1fr; }
+}
+
+/* Nothing on screen is worth printing except the content. */
+@media print {
+  .sidebar, .topbar, .toolbar, .menu-btn, .scrim { display: none !important; }
+  .app { display: block; }
+  .page { padding: 0; max-width: none; }
+  .panel { break-inside: avoid; border: 1px solid #ccc; }
+}

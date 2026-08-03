@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Reports · Ops{% endblock %}
+{% block heading %}Reports{% endblock %}
+
+{% block topbar %}
+<button class="small" onclick="window.print()">Print</button>
+{% endblock %}
+
+{% block content %}
+{#
+  The management view. Deliberately a page of conclusions rather than controls:
+  no filters, no search, nothing to configure - just what the state of things
+  is, in an order that reads top to bottom, and prints on one sheet.
+
+  Every figure here comes from the same rows the operational pages use, so a
+  report can never disagree with the dashboard it summarises.
+#}
+
+<div class="page-intro">
+  <div>
+    <p>Generated <span id="generated"></span> from live data. Print or export any table below.</p>
+  </div>
+</div>
+
+<div class="tiles" id="headline"></div>
+<div id="body"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function healthBar(h) {
+  const seg = (kind, n, label, colour) => {
+    if (!n) return '';
+    const pct = (100 * n) / (h.total || 1);
+    return `<div class="seg" style="flex:0 0 ${pct}%;background:${colour}"
+      title="${label}: ${n} (${pct.toFixed(0)}%)">${pct > 8 ? n : ''}</div>`;
+  };
+  return `<div class="compare-bar">
+      ${seg('ok', h.healthy, 'Healthy', '#2e8b57')}
+      ${seg('warn', h.warning, 'Warning', '#b8860b')}
+      ${seg('bad', h.failed, 'Failed', '#b3261e')}
+    </div>
+    <div class="compare-legend">
+      <span class="item"><i class="swatch" style="background:#2e8b57"></i>Healthy <b class="n">${fmtNum(h.healthy)}</b></span>
+      <span class="item"><i class="swatch" style="background:#b8860b"></i>Warning <b class="n">${fmtNum(h.warning)}</b></span>
+      <span class="item"><i class="swatch" style="background:#b3261e"></i>Failed <b class="n">${fmtNum(h.failed)}</b></span>
+    </div>`;
+}
+
+function rankTable(title, hint, rows, valueLabel, colour) {
+  return `<div class="panel">
+    <div class="panel-head"><h2>${esc(title)}</h2><span class="hint">${esc(hint)}</span></div>
+    ${rows.length ? `<div class="table-scroll" style="--table-max-h:none">
+      <table>
+        <thead><tr><th class="sticky-col">Partner</th><th class="num">${esc(valueLabel)}</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `<tr>
+            <td class="sticky-col name"><a href="/partners/${encodeURIComponent(r.name)}">${esc(r.name)}</a></td>
+            <td class="num"${colour ? ` style="color:${colour};font-weight:650"` : ''}>${fmtNum(r.value)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>` : `<div class="panel-body">${emptyState('Nothing to report', '')}</div>`}
+  </div>`;
+}
+
+async function load() {
+  const r = await getJSON('/api/reports/summary');
+  document.getElementById('generated').textContent = fmtTime(r.generated_at);
+
+  document.getElementById('headline').innerHTML = tiles([
+    { label: 'Partners monitored', value: fmtNum(r.health.total),
+      sub: `${fmtPct(r.health.healthy_pct, 0)} healthy` },
+    { label: 'Records held', value: fmtNum(r.totals.feed_total), sub: fmtShort(r.totals.feed_total) },
+    { label: 'Live records', value: fmtNum(r.totals.db_future), sub: `${fmtPct(r.totals.live_pct)} of everything held` },
+    { label: 'Open issues', value: fmtNum(r.issues.total),
+      sub: `${fmtNum(r.issues.critical)} critical`,
+      cls: r.issues.critical ? 'is-bad' : 'is-ok' },
+    { label: 'Missing from database', value: fmtNum(r.totals.feed_total !== null ? (r.most_missing.reduce((n, x) => n + x.value, 0)) : 0),
+      sub: `across ${r.comparison_coverage.compared} compared partners`,
+      cls: 'is-bad' },
+    { label: 'Sites down', value: fmtNum(r.sites.down), sub: `of ${fmtNum(r.sites.total)}`,
+      cls: r.sites.down ? 'is-bad' : 'is-ok' },
+  ]);
+
+  document.getElementById('body').innerHTML = `
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Partner health</h2>
+          <span class="hint">by the issues open against each</span></div>
+        <div class="panel-body">${healthBar(r.health)}</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Ingest jobs that have stopped</h2>
+          <span class="hint">largest first — these are the ones worth chasing</span>
+        </div>
+        ${r.stalled.length ? `<div class="table-scroll" style="--table-max-h:none">
+          <table>
+            <thead><tr>
+              <th class="sticky-col">Partner</th><th class="num">Live records</th>
+              <th class="num">Days since insert</th><th>Expected</th><th>Cron entry</th><th>Server</th>
+            </tr></thead>
+            <tbody>
+              ${r.stalled.map((s) => `<tr>
+                <td class="sticky-col name"><a href="/partners/${encodeURIComponent(s.name)}">${esc(s.name)}</a></td>
+                <td class="num">${fmtNum(s.live)}</td>
+                <td class="num" style="color:var(--bad);font-weight:650">${s.days !== null ? Math.round(s.days) : '—'}</td>
+                <td>${esc(s.frequency || '—')}</td>
+                <td>${cronBadge(s.cron_status)}</td>
+                <td><span class="chip">${esc(s.server || '—')}</span></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>` : `<div class="panel-body">${emptyState('Every ingest job is running', 'No partner is past its expected interval.')}</div>`}
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <h2>Spreadsheet comparison</h2>
+        <span class="hint">${r.comparison_coverage.compared} of ${r.comparison_coverage.total}
+          partners compared (${fmtPct(r.comparison_coverage.pct, 0)})</span>
+      </div>
+      <div class="split">
+        ${rankTable('Most records missing from the database',
+                    'in the partner sheet, not in ours', r.most_missing, 'Missing', 'var(--bad)')}
+        ${rankTable('Most extra records in the database',
+                    'in ours, not in the partner sheet', r.most_extra, 'Extra', 'var(--warn)')}
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="split">
+        ${rankTable('Largest partners', 'by live records', r.biggest_partners, 'Live records')}
+        ${rankTable('Most unpublished records', 'inserted but never went live',
+                    r.most_unpublished, 'Not published', 'var(--warn)')}
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel">
+        <div class="panel-head"><h2>Infrastructure</h2></div>
+        <div class="panel-body">
+          <dl class="detail-grid">
+            <div><dt>Servers reporting</dt><dd>${fmtNum(r.processes.servers)}
+              ${r.processes.stale ? `<span style="color:var(--bad)"> · ${r.processes.stale} offline</span>` : ''}</dd></div>
+            <div><dt>Processes</dt><dd>${fmtNum(r.processes.total)}
+              ${r.processes.errored ? `<span style="color:var(--bad)"> · ${r.processes.errored} errored</span>` : ''}</dd></div>
+            <div><dt>Websites monitored</dt><dd>${fmtNum(r.sites.total)}
+              ${r.sites.down ? `<span style="color:var(--bad)"> · ${r.sites.down} down</span>` : ''}</dd></div>
+            <div><dt>Partners never counted</dt><dd>${fmtNum(r.totals.never_collected)}</dd></div>
+            <div><dt>Count query errors</dt><dd>${fmtNum(r.totals.query_errors)}</dd></div>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="panel"><div class="panel-head"><h2>Take it away</h2></div>
+        <div class="panel-body" style="display:flex;gap:var(--s2);flex-wrap:wrap">
+          <a class="btn" href="/download/partners.csv" download>All partners (CSV)</a>
+          <a class="btn" href="/download/issues.csv" download>All issues (CSV)</a>
+          <a class="btn" href="/download/sites.csv" download>Website health (CSV)</a>
+          <a class="btn" href="/download/cron.csv" download>Cron inventory (CSV)</a>
+          <a class="btn" href="/downloads">More downloads →</a>
+        </div>
+      </div>
+    </div>`;
+}
+
+startPolling(load, 60000);
+</script>
+{% endblock %}
