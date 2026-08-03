@@ -32,6 +32,10 @@ ENV_PATH = _find_env()
 
 APP_DEFAULTS = {
     "agent_secret": "change-this-to-a-secure-token",
+    # HTTP Basic auth on every page. The password is read from .env only
+    # (OPS_AUTH_PASSWORD); an empty one leaves the dashboard open, which is
+    # the right default for a laptop but must be set on anything reachable.
+    "auth_user": "admin",
     # The DB sweep runs on the hour, so this is only the fallback cadence used
     # when counts_hourly is turned off.
     "counts_interval_seconds": 3600,
@@ -137,6 +141,10 @@ class Config:
         app = {**APP_DEFAULTS, **(raw.get("app") or {})}
         # The shared secret belongs in .env, not in config.yaml.
         self.agent_secret: str = os.environ.get("OPS_AGENT_SECRET") or app["agent_secret"]
+        # Login for the UI. Username may live in config.yaml; the password is
+        # environment/.env only, on purpose - same rule as SMTP and MySQL.
+        self.auth_user: str = os.environ.get("OPS_AUTH_USER") or str(app["auth_user"])
+        self.auth_password: str = os.environ.get("OPS_AUTH_PASSWORD", "")
         self.counts_interval: int = int(app["counts_interval_seconds"])
         # True = fire on the top of every hour (24 MySQL sweeps a day, no drift).
         # False = plain timer on counts_interval_seconds.
@@ -199,6 +207,13 @@ class Config:
             w.setdefault("name", w["url"])
             w.setdefault("expect_status", 200)
             w.setdefault("timeout", 10)
+
+    @property
+    def auth_enabled(self) -> bool:
+        """Basic auth is on as soon as a password exists. No separate switch -
+        one that could be left off while a password sits in .env is worse than
+        no switch at all."""
+        return bool(self.auth_password)
 
     @property
     def has_db_password(self) -> bool:

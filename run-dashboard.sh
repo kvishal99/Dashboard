@@ -65,7 +65,18 @@ case "${1:-start}" in
     pid="$(running_pid || true)"
     if [ -n "$pid" ]; then
       echo "running (pid $pid) on $APP_HOST:$APP_PORT"
-      curl -s -o /dev/null -w "http %{http_code}\n" \
+      # A 401 here would mean "up and protected", but that reads like a fault
+      # in a status line, so send the login if one is configured.
+      # Same .env the app reads (beside the code, or one level up), and the
+      # same precedence: an already-exported variable wins.
+      for f in "$PWD/.env" "$(dirname "$PWD")/.env"; do
+        [ -f "$f" ] || continue
+        : "${OPS_AUTH_USER:=$(sed -n 's/^OPS_AUTH_USER=//p' "$f" | tr -d '"'"'"'')}"
+        : "${OPS_AUTH_PASSWORD:=$(sed -n 's/^OPS_AUTH_PASSWORD=//p' "$f" | tr -d '"'"'"'')}"
+      done
+      AUTH=()
+      [ -n "${OPS_AUTH_PASSWORD:-}" ] && AUTH=(-u "${OPS_AUTH_USER:-admin}:$OPS_AUTH_PASSWORD")
+      curl -s -o /dev/null -w "http %{http_code}\n" "${AUTH[@]}" \
         "http://$APP_HOST:$APP_PORT/api/jobs" 2>/dev/null || echo "not answering yet"
     else
       echo "not running"; exit 1

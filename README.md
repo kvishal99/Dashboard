@@ -162,6 +162,36 @@ cp .env.example .env      # then fill in OPS_DB_PASSWORD
 ./venv/bin/python dashboard.py           # http://localhost:8000
 ```
 
+### Login (HTTP Basic — the .htaccess equivalent)
+
+Nothing sits in front of this process, so the password prompt comes from the
+app. In `.env`:
+
+```
+OPS_AUTH_USER=admin
+OPS_AUTH_PASSWORD=some-strong-password
+```
+
+- Auth turns on **as soon as `OPS_AUTH_PASSWORD` is set**. There is no separate
+  on/off switch — one that could be left off while a password sits in `.env`
+  would be worse than none. With no password the app logs
+  `[auth] OPS_AUTH_PASSWORD is not set - dashboard is UNPROTECTED` and serves
+  openly, which is fine on a laptop and wrong on anything reachable.
+- It covers **every page, every API route and `/static`** — it is middleware
+  ([auth.py](auth.py)), not a per-route dependency, so a route added later
+  cannot forget it.
+- The three agent push endpoints are **exempt**: `/api/pm2/report`,
+  `/api/cron/report`, `/api/partners/feed-count`. They already authenticate
+  with `x-agent-secret`, and `agent.py` runs unattended on every monitored
+  server — requiring the browser password there would mean redeploying all of
+  them whenever it changes.
+- `OPS_AUTH_USER` may also be set as `app.auth_user` in config.yaml. The
+  password is environment-only, same rule as MySQL and SMTP.
+
+Curl against a protected instance: `curl -u admin:password http://…/api/jobs`.
+Basic auth sends the password base64-encoded, not encrypted — behind the
+Cloudflare tunnel (HTTPS) that's fine; over plain HTTP it is not.
+
 ### ⚠ Which MySQL it talks to — read this
 
 **It currently queries the MySQL on this laptop** (`127.0.0.1`), and that copy
@@ -448,6 +478,9 @@ and `text=` (both 3.7+).
 
 ## HTTP API
 
+Every route below needs the Basic-auth login once `OPS_AUTH_PASSWORD` is set,
+except the two `x-agent-secret` POSTs, which never do.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/partners` | All partner rows + summary + job status |
@@ -468,6 +501,7 @@ and `text=` (both 3.7+).
 
 ```
 dashboard.py    FastAPI app, routes, aggregation
+auth.py         HTTP Basic auth middleware (the .htaccess equivalent)
 config.py       config.yaml + .env loading
 config.yaml     partners, queries, websites, intervals
 mysql.py        read-only MySQL access + the SELECT-only guard

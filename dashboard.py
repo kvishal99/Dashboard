@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 import cron_parse
 import jobs as jobs_mod
 import mysql
+from auth import BasicAuthMiddleware
 from config import BASE_DIR, load_config
 from scheduler import Scheduler
 from store import Store
@@ -45,6 +46,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ops Dashboard", lifespan=lifespan)
+
+# The .htaccess equivalent: a browser login in front of every page and API
+# route. Only added when a password is configured, so a local checkout without
+# .env still runs; see auth.py for what stays exempt and why.
+if config.auth_enabled:
+    app.add_middleware(
+        BasicAuthMiddleware, username=config.auth_user, password=config.auth_password
+    )
+else:
+    print("[auth] OPS_AUTH_PASSWORD is not set - dashboard is UNPROTECTED")
+
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
