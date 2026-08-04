@@ -7,110 +7,792 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-intro">
-  <div>
-    <p>
-      Every partner with counts, in one sortable table. <strong>Total</strong> is
-      everything we hold; it splits into <strong>live</strong> (published, today
-      forward), <strong>ended</strong>, and <strong>not published</strong> —
-      inserted but never went live, which is usually the number worth chasing.
-      Click any row to open the partner.
-    </p>
-  </div>
-</div>
+{#
+  The partner workspace, and the shape of the whole dashboard: choose a partner
+  on the left, see that partner - and only that partner - on the right.
 
-<div id="table"></div>
+  The list is deliberately three facts per row (name, status, last run). Records,
+  live percentages, missing counts and cron state all used to sit in the list as
+  columns; they moved into the detail pane, because a list is for finding the
+  partner you want, not for reading.
+
+  Every tab fetches its own partner-scoped endpoint, so switching partners
+  genuinely replaces what is on screen rather than filtering something that
+  already loaded everyone.
+#}
+<div class="workspace">
+
+  <div class="partner-pane">
+    <div class="pick-list">
+      <div class="pick-head">
+        <input type="search" id="partner-search" placeholder="Search partners…"
+               autocomplete="off" aria-label="Search partners">
+        <div class="row">
+          <button class="pill" data-status="failed" aria-pressed="false">Failed <span class="n" id="n-failed"></span></button>
+          <button class="pill" data-status="warning" aria-pressed="false">Warning <span class="n" id="n-warning"></span></button>
+          <span class="count" id="partner-count"></span>
+        </div>
+      </div>
+      <div class="pick-scroll">
+        <div class="pick-columns">
+          <span>Partner</span><span>Status</span>
+        </div>
+        <div id="partner-list" role="listbox" aria-label="Partners"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="detail-pane" id="detail">
+    <div class="panel"><div class="panel-body">
+      <div class="skeleton" style="height:140px"></div>
+    </div></div>
+  </div>
+
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-const table = new DataTable('#table', {
-  searchKeys: ['name', 'server', 'frequency'],
-  searchPlaceholder: 'Search partner or server…',
-  exportHref: '/download/partners.csv',
-  sort: { key: 'feed_total', dir: 'desc' },
-  pageSize: 50,
-  emptyTitle: 'No partners counted yet',
-  emptyDetail: 'The MySQL sweep runs on the top of every hour.',
-  legend: statusLegend(['partner', 'jobs', 'cron_entry'],
-                       'What these statuses mean — the first rule that matches wins'),
-  chips: [
-    { key: 'failed', label: 'Failed', test: (r) => r.status === 'failed' },
-    { key: 'warning', label: 'Warning', test: (r) => r.status === 'warning' },
-    { key: 'stalled', label: 'Stalled job', test: (r) => r.job_state === 'stalled' },
-    { key: 'missing', label: 'Has missing records', test: (r) => (r.comparison || {}).missing > 0 },
-  ],
-  filters: [
-    { key: 'server', label: 'Server', options: [], test: (r, v) => (r.server || '—') === v },
-  ],
-  onRowClick: (row) => { window.location.href = `/partners/${encodeURIComponent(row.name)}`; },
-  columns: [
-    { key: 'name', label: 'Partner', sticky: true, sortDefault: 'asc',
-      render: (r) => `<a href="/partners/${encodeURIComponent(r.name)}">${esc(r.name)}</a>
-        ${r.note ? `<div class="sub" style="max-width:26ch">${esc(r.note)}</div>` : ''}` },
-    { key: 'status', label: 'Status', sortValue: (r) => ({ failed: 0, warning: 1, running: 2, success: 3 }[r.status] ?? 4),
-      sortDefault: 'asc', render: (r) => partnerStatusBadge(r.status) },
-    { key: 'issue_count', label: 'Issues', num: true,
-      render: (r) => (r.issue_count
-        ? `<span style="color:var(--${r.status === 'failed' ? 'bad' : 'warn'});font-weight:650">${r.issue_count}</span>`
-        : '<span class="muted">0</span>') },
-    { key: 'partner_feed_count', label: 'In partner feed', num: true,
-      title: 'What the partner has on their side. Not in our database — reported by an ingest script or imported from the status sheet.',
-      render: (r) => (r.partner_feed_count === null
-        ? '<span class="muted" title="Not reported yet — this number is not in our database.">—</span>'
-        : numCell(r.partner_feed_count)) },
-    { key: 'feed_total', label: 'Total', num: true, render: (r) => numCell(r.feed_total) },
-    { key: 'db_future', label: 'Live', num: true, render: (r) => numCell(r.db_future) },
-    { key: 'db_past', label: 'Ended', num: true, render: (r) => numCell(r.db_past) },
-    { key: 'db_unpublished', label: 'Not published', num: true,
-      render: (r) => `${numCell(r.db_unpublished)}${r.unpublished_pct >= 50
-        ? `<div class="sub" style="color:var(--warn)">${fmtPct(r.unpublished_pct, 0)} of total</div>` : ''}` },
-    { key: 'live_pct', label: '% live', render: (r) => meter(r.live_pct) },
-    { key: 'missing', label: 'Missing', num: true,
-      sortValue: (r) => (r.comparison || {}).missing,
-      title: 'Rows in the partner spreadsheet with no match in our database. Blank until a sheet is uploaded and compared.',
-      render: (r) => {
-        const c = r.comparison;
-        if (!c || !c.ok) return '<span class="muted" title="No spreadsheet compared">—</span>';
-        return c.missing
-          ? `<span style="color:var(--bad);font-weight:650">${fmtNum(c.missing)}</span>`
-          : '<span style="color:var(--ok)">0</span>';
-      } },
-    { key: 'extra', label: 'Extra', num: true,
-      sortValue: (r) => (r.comparison || {}).extra,
-      title: 'Records in our database with no row in the partner spreadsheet.',
-      render: (r) => {
-        const c = r.comparison;
-        if (!c || !c.ok) return '<span class="muted">—</span>';
-        return c.extra
-          ? `<span style="color:var(--warn);font-weight:650">${fmtNum(c.extra)}</span>`
-          : '<span style="color:var(--ok)">0</span>';
-      } },
-    { key: 'job_state', label: 'Ingest job',
-      sortValue: (r) => ({ stalled: 0, never: 1, late: 2, unknown: 3, dormant: 4, retired: 5, ok: 6 }[r.job_state] ?? 9),
-      sortDefault: 'asc',
-      render: (r) => `${jobBadge(r.job_state)}${r.job_days_since !== null
-        ? `<div class="sub">${r.job_days_since}d since insert</div>` : ''}` },
-    { key: 'cron_status', label: 'Cron', render: (r) => cronBadge(r.cron_status) },
-    { key: 'server', label: 'Server', render: (r) => `<span class="chip">${esc(r.server || '—')}</span>` },
-    { key: 'collected_at', label: 'Checked',
-      render: (r) => `<span class="muted" title="${esc(fmtTime(r.collected_at))}">${timeAgo(r.collected_at)}</span>` },
-  ],
+/* The partner selected on load, when the URL names one (/partners/wcities). */
+const INITIAL_PARTNER = {{ (selected or '') | tojson }};
+
+let PARTNERS = [];
+let SELECTED = null;
+let ACTIVE_TAB = 'overview';
+const filter = { query: '', statuses: new Set() };
+
+/* Each tab loads once per partner and is cached until the partner changes.
+ * Switching back and forth must not re-fetch, but switching PARTNER must
+ * invalidate everything - that is the bug this object exists to prevent. */
+let tabCache = {};
+
+const TABS = [
+  { key: 'overview',   label: 'Overview' },
+  { key: 'jobs',       label: 'Jobs' },
+  { key: 'logs',       label: 'Process Logs' },
+  { key: 'files',      label: 'Generated Files' },
+  { key: 'comparison', label: 'Comparison' },
+  { key: 'issues',     label: 'Issues', count: (p) => p.issue_count },
+];
+
+/* ------------------------------------------------------- partner list */
+
+/* "Last run" means the last time this partner's ingest actually inserted
+ * something - the fact an operator is asking about - not the last time this
+ * dashboard counted it. The day figure comes from the server, which derives it
+ * from MAX(created); the browser never parses that timestamp itself. */
+function lastRun(p) {
+  if (p.job_days_since === null || p.job_days_since === undefined) {
+    return p.collected_at
+      ? `<span class="muted">No insert recorded · counted ${timeAgo(p.collected_at)}</span>`
+      : '<span class="muted">Never run</span>';
+  }
+  const days = Math.round(p.job_days_since);
+  return `Last run ${days === 0 ? 'today' : `${days}d ago`}`;
+}
+
+function listItem(p) {
+  const selected = p.name === SELECTED;
+  return `<button class="pick-item status-${esc(p.status)}${selected ? ' selected' : ''}"
+      data-partner="${esc(p.name)}" role="option" aria-selected="${selected}">
+    <span class="name" title="${esc(p.name)}">${esc(p.name)}</span>
+    ${partnerStatusBadge(p.status)}
+    <span class="when">${lastRun(p)}</span>
+  </button>`;
+}
+
+function renderList() {
+  let rows = PARTNERS;
+  if (filter.query) rows = rows.filter((p) => p.name.toLowerCase().includes(filter.query));
+  if (filter.statuses.size) rows = rows.filter((p) => filter.statuses.has(p.status));
+
+  // Worst first: on a list meant to answer "who needs me?", alphabetical order
+  // buries the answer somewhere around letter M.
+  const rank = { failed: 0, warning: 1, running: 2, success: 3 };
+  rows = rows.slice().sort((a, b) =>
+    (rank[a.status] - rank[b.status]) || a.name.localeCompare(b.name));
+
+  document.getElementById('partner-list').innerHTML = rows.length
+    ? rows.map(listItem).join('')
+    : emptyState('No partners match', 'Try clearing the search or filters.');
+
+  document.getElementById('partner-count').textContent =
+    rows.length === PARTNERS.length
+      ? `${fmtNum(PARTNERS.length)} partners`
+      : `${fmtNum(rows.length)} of ${fmtNum(PARTNERS.length)}`;
+
+  for (const status of ['failed', 'warning']) {
+    document.getElementById(`n-${status}`).textContent =
+      PARTNERS.filter((p) => p.status === status).length || '';
+  }
+}
+
+/* --------------------------------------------------------- detail shell */
+
+function renderDetailShell(p) {
+  document.getElementById('detail').innerHTML = `
+    <div class="section-head" style="margin-bottom:var(--s3)">
+      <h2>${esc(p.name)}</h2>
+      <span class="hint">
+        ${p.server ? `<span class="chip">${esc(p.server)}</span> ` : ''}
+        ${p.frequency ? esc(p.frequency) + ' · ' : ''}${jobBadge(p.job_state)}
+      </span>
+    </div>
+
+    <div class="toolbar" style="border:1px solid var(--border);border-radius:var(--radius-lg);
+         background:var(--surface);margin-bottom:var(--s4)">
+      ${TABS.map((t) => {
+        const n = t.count ? t.count(p) : 0;
+        return `<button class="pill${t.key === ACTIVE_TAB ? ' active' : ''}" data-tab="${t.key}">
+          ${esc(t.label)}${n ? ` <span class="n">${n}</span>` : ''}</button>`;
+      }).join('')}
+      <span class="spacer"></span>
+      <button class="small" id="refresh-partner">Refresh</button>
+    </div>
+
+    <div id="tab-body"></div>`;
+
+  document.querySelectorAll('#detail .pill[data-tab]').forEach((pill) => {
+    pill.addEventListener('click', () => selectTab(pill.dataset.tab));
+  });
+  wireAction('refresh-partner',
+    `/api/partners/${encodeURIComponent(p.name)}/refresh`,
+    () => { tabCache = {}; loadPartner(p.name, true); },
+    { busy: 'Counting…' });
+}
+
+/* ------------------------------------------------------------- tabs */
+
+function selectTab(key) {
+  ACTIVE_TAB = key;
+  document.querySelectorAll('#detail .pill[data-tab]').forEach((p) =>
+    p.classList.toggle('active', p.dataset.tab === key));
+  history.replaceState(null, '', `/partners/${encodeURIComponent(SELECTED)}#${key}`);
+  renderTab();
+}
+
+async function renderTab() {
+  const body = document.getElementById('tab-body');
+  if (!body) return;
+  const partner = SELECTED;
+  const key = ACTIVE_TAB;
+
+  if (key === 'overview') { body.innerHTML = overviewHTML(tabCache.partner); return; }
+  if (key === 'issues')   { body.innerHTML = issuesHTML(tabCache.partner); return; }
+
+  if (!tabCache[key]) {
+    body.innerHTML = `<div class="panel"><div class="panel-body">
+      <div class="skeleton" style="height:100px"></div></div></div>`;
+    try {
+      tabCache[key] = await getJSON(
+        `/api/partners/${encodeURIComponent(partner)}/${key}`);
+    } catch (err) {
+      body.innerHTML = `<div class="notice bad"><div class="body">${esc(err.message)}</div></div>`;
+      return;
+    }
+    // The user switched partner or tab while this was in flight - throwing the
+    // result away is correct; rendering it would paint another partner's data.
+    if (SELECTED !== partner || ACTIVE_TAB !== key) return;
+  }
+
+  if (key === 'jobs')  body.innerHTML = jobsHTML(tabCache.jobs);
+  if (key === 'logs')  body.innerHTML = logsHTML(tabCache.logs);
+  if (key === 'files') { body.innerHTML = filesHTML(tabCache.files); wireFiles(); }
+  if (key === 'comparison') {
+    body.innerHTML = comparisonHTML(tabCache.comparison);
+    wireUpload();
+    const c = tabCache.comparison.comparison;
+    if (c && c.ok) buildRowTables(c);
+  }
+}
+
+/* -------------------------------------------------------- comparison */
+
+/* Upload a partner sheet and diff it against the database. Carried over from
+ * the old per-partner page unchanged in behaviour - this is the one thing
+ * counts can never answer, since two sides can hold the same NUMBER of records
+ * without holding the same records. */
+
+function comparisonHTML(data) {
+  if (!data) return '';
+  const c = data.comparison;
+  const upload = data.upload;
+
+  const uploadPanel = `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head">
+        <h2>Partner spreadsheet</h2>
+        <span class="hint">${upload
+          ? `${esc(upload.filename)} · ${fmtNum(upload.row_count)} rows · uploaded ${timeAgo(upload.uploaded_at)}`
+          : 'nothing uploaded yet'}</span>
+      </div>
+      <div class="panel-body">
+        <div class="dropzone" id="dropzone" role="button" tabindex="0">
+          <div class="big">Drop a .csv or .xlsx here, or click to choose</div>
+          <div style="margin-top:var(--s1)">
+            The sheet needs a tour name, an id, or a product URL column —
+            that is what ties its rows to ours.
+          </div>
+          <input type="file" id="file-input" accept=".csv,.xlsx,.tsv,text/csv" hidden>
+        </div>
+        <div id="mapping"></div>
+        <div style="margin-top:var(--s4);display:flex;gap:var(--s2);flex-wrap:wrap">
+          <button class="primary" id="run-compare" ${upload ? '' : 'disabled'}>
+            Compare against database
+          </button>
+          ${upload ? `<a class="btn" href="/download/upload/${upload.id}" download>Download this sheet</a>
+            <button class="danger" id="delete-upload">Delete upload</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+
+  if (!c) {
+    return uploadPanel + `<div class="notice info"><div class="body">
+      <strong>No comparison has been run yet.</strong>
+      Counts alone cannot answer this: two sides can hold the same number of
+      records and still not hold the same records.
+    </div></div>`;
+  }
+  if (!c.ok) {
+    return uploadPanel + `<div class="notice bad"><div class="body">
+      <strong>The last comparison did not produce a result.</strong><br>
+      ${esc(c.error || 'No reason was recorded.')}
+    </div></div>`;
+  }
+
+  return uploadPanel + `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head">
+        <h2>Spreadsheet vs database</h2>
+        <span class="hint">matched on <strong>${esc(c.strategy_label || '—')}</strong> ·
+          compared ${timeAgo(c.computed_at)}</span>
+      </div>
+      <div class="panel-body">
+        ${comparisonBar(c)}
+        ${c.reliable === 0 || c.reliable === false ? `<div class="notice warn" style="margin-top:var(--s4)">
+          <div class="body"><strong>This comparison is probably measuring a column mismatch, not real gaps.</strong>
+          Only ${fmtPct((c.match_rate || 0) * 100, 0)} of rows matched on
+          ${esc(c.strategy_label)}.</div></div>` : ''}
+        <dl class="detail-grid" style="margin-top:var(--s4)">
+          <div><dt>Total in spreadsheet</dt><dd>${fmtNum(c.sheet_total)}</dd></div>
+          <div><dt>Total in database</dt><dd>${fmtNum(c.db_total)}</dd></div>
+          <div><dt>Matching</dt><dd style="color:var(--ok);font-weight:650">${fmtNum(c.matching)}</dd></div>
+          <div><dt>Missing from database</dt><dd style="color:var(--bad);font-weight:650">${fmtNum(c.missing)}</dd></div>
+          <div><dt>Extra in database</dt><dd style="color:var(--warn);font-weight:650">${fmtNum(c.extra)}</dd></div>
+          <div><dt>Match rate</dt><dd>${fmtPct((c.match_rate || 0) * 100)}</dd></div>
+        </dl>
+      </div>
+      ${statusLegend('compare', 'What matching, missing and extra mean')}
+    </div>
+
+    <div class="split">
+      <div id="missing-table"></div>
+      <div id="extra-table"></div>
+    </div>`;
+}
+
+/* Paged from the server: a large partner produces tens of thousands of missing
+ * rows, and shipping them all to slice out 25 would be pointless. */
+function buildRowTables(c) {
+  const columns = [
+    { key: 'title', label: 'Title', sortable: false, render: (r) => esc(r.title || '—') },
+    { key: 'start_date', label: 'Start', sortable: false,
+      render: (r) => `<span class="nowrap">${esc(r.start_date || '—')}</span>` },
+    { key: 'external_id', label: 'ID', sortable: false,
+      render: (r) => `<span class="chip">${esc(r.external_id || '—')}</span>` },
+  ];
+  const make = (sel, side, title, hint, emptyTitle, emptyDetail) => new RemoteTable(sel, {
+    title, hint, columns,
+    searchKeys: ['title'], searchPlaceholder: 'Search…',
+    exportHref: `/download/comparison/${c.id}/${side}.csv`,
+    pageSize: 25, maxHeight: '40vh', emptyTitle, emptyDetail,
+    fetchPage: ({ offset, limit, query }) =>
+      getJSON(`/api/comparisons/${c.id}/rows?side=${side}&offset=${offset}&limit=${limit}&q=${encodeURIComponent(query || '')}`),
+  });
+
+  make('#missing-table', 'missing', `Missing from database (${fmtNum(c.missing)})`,
+       'in the spreadsheet, not in ours', 'Nothing missing',
+       'Every row in the spreadsheet has a match in the database.');
+  make('#extra-table', 'extra', `Extra in database (${fmtNum(c.extra)})`,
+       'in ours, not in the spreadsheet', 'Nothing extra',
+       'Every record in the database appears in the spreadsheet.');
+}
+
+function renderMapping(mapping) {
+  const labels = {
+    external_id: 'Partner ID', title: 'Title', start_date: 'Start date',
+    end_date: 'End date', venue: 'Venue', url: 'Product URL',
+  };
+  const el = document.getElementById('mapping');
+  if (!el) return;
+  el.innerHTML = `
+    <div class="notice ok" style="margin-top:var(--s3)"><div class="body">
+      <strong>Sheet read.</strong> These are the columns it will be compared on.
+    </div></div>
+    <div class="mapping">
+      ${Object.entries(labels).map(([field, label]) => {
+        const column = mapping[field];
+        return `<div class="pair ${column ? '' : 'unmapped'}">
+          <div class="field-name">${esc(label)}</div>
+          <div class="col">${column ? esc(column) : 'not found in sheet'}</div>
+        </div>`;
+      }).join('')}
+    </div>`;
+}
+
+function wireUpload() {
+  const zone = document.getElementById('dropzone');
+  const input = document.getElementById('file-input');
+  if (!zone || !input) return;
+
+  const choose = () => input.click();
+  zone.addEventListener('click', choose);
+  zone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); }
+  });
+  ['dragenter', 'dragover'].forEach((t) => zone.addEventListener(t, (e) => {
+    e.preventDefault(); zone.classList.add('dragover');
+  }));
+  ['dragleave', 'drop'].forEach((t) => zone.addEventListener(t, (e) => {
+    e.preventDefault(); zone.classList.remove('dragover');
+  }));
+  zone.addEventListener('drop', (e) => {
+    if (e.dataTransfer.files.length) uploadSheet(e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) uploadSheet(input.files[0]);
+  });
+
+  const runBtn = document.getElementById('run-compare');
+  if (runBtn) runBtn.addEventListener('click', runComparison);
+
+  const del = document.getElementById('delete-upload');
+  if (del) {
+    del.addEventListener('click', async () => {
+      const upload = tabCache.comparison.upload;
+      if (!confirm(`Delete "${upload.filename}" and every comparison built from it?`)) return;
+      try {
+        await sendJSON(`/api/uploads/${upload.id}`, 'DELETE');
+        toast('Upload deleted', 'ok');
+        await reloadComparison();
+      } catch (err) { toast(err.message, 'bad'); }
+    });
+  }
+}
+
+/* Sent as the raw request body with the name in a header - no multipart, so no
+ * extra dependency for one button. */
+async function uploadSheet(file) {
+  const partner = SELECTED;
+  const zone = document.getElementById('dropzone');
+  zone.innerHTML = `<div class="big">Reading ${esc(file.name)}…</div>`;
+  try {
+    const res = await fetch(`/api/partners/${encodeURIComponent(partner)}/upload`, {
+      method: 'POST', headers: { 'X-Filename': file.name }, body: file,
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || `${res.status} ${res.statusText}`);
+    toast(`Read ${fmtNum(body.rows)} rows`, 'ok');
+    await reloadComparison();
+    renderMapping(body.mapping);
+    // Straight into the comparison: uploading a sheet and not comparing it is
+    // never what anyone meant to do.
+    await runComparison();
+  } catch (err) {
+    toast(err.message, 'bad');
+    await reloadComparison();
+  }
+}
+
+async function runComparison() {
+  const btn = document.getElementById('run-compare');
+  if (btn) { btn.disabled = true; btn.textContent = 'Comparing…'; }
+  try {
+    const result = await postJSON(
+      `/api/partners/${encodeURIComponent(SELECTED)}/compare`);
+    toast(result.ok
+      ? `${fmtNum(result.matching)} matching · ${fmtNum(result.missing)} missing · ${fmtNum(result.extra)} extra`
+      : (result.error || 'Comparison produced no result'), result.ok ? 'ok' : 'bad');
+    await reloadComparison();
+  } catch (err) {
+    toast(err.message, 'bad');
+    if (btn) { btn.disabled = false; btn.textContent = 'Compare against database'; }
+  }
+}
+
+async function reloadComparison() {
+  const partner = SELECTED;
+  const data = await getJSON(`/api/partners/${encodeURIComponent(partner)}/comparison`);
+  if (SELECTED !== partner) return;
+  tabCache.comparison = data;
+  if (ACTIVE_TAB === 'comparison') renderTab();
+}
+
+/* ---------------------------------------------------------- overview */
+
+function overviewHTML(p) {
+  if (!p) return '';
+  const c = p.comparison;
+  return `
+    <div class="tiles">
+      ${tiles([
+        { label: 'Total records', value: fmtNum(p.feed_total), sub: fmtShort(p.feed_total) || 'held for this partner' },
+        { label: 'Live', value: fmtNum(p.db_future),
+          sub: p.live_pct !== null ? `${fmtPct(p.live_pct)} of everything held` : 'published, today & future' },
+        { label: 'Already ended', value: fmtNum(p.db_past), sub: 'inserted fine, just past' },
+        { label: 'Not published', value: fmtNum(p.db_unpublished),
+          sub: p.unpublished_pct !== null ? `${fmtPct(p.unpublished_pct, 0)} of total` : 'never went live',
+          cls: p.unpublished_pct >= 40 ? 'is-warn' : '' },
+        { label: 'Open issues', value: fmtNum(p.issue_count),
+          sub: p.issue_count ? 'see the Issues tab' : 'nothing to act on',
+          cls: p.issue_count ? (p.status === 'failed' ? 'is-bad' : 'is-warn') : 'is-ok' },
+        { label: 'Last counted', value: timeAgo(p.collected_at),
+          sub: p.ok === false ? 'last attempt FAILED' : 'from the hourly sweep',
+          cls: p.ok === false ? 'is-bad' : '' },
+      ])}
+    </div>
+
+    ${c && c.ok ? `<div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head"><h2>Spreadsheet vs database</h2>
+        <span class="hint">matched on ${esc(c.strategy_label || '—')} · ${timeAgo(c.computed_at)}</span></div>
+      <div class="panel-body">${comparisonBar(c)}</div>
+    </div>` : ''}
+
+    <div class="panel">
+      <div class="panel-head"><h2>Details</h2></div>
+      <div class="panel-body">
+        <dl class="detail-grid">
+          <div><dt>Ingest job</dt><dd>${jobBadge(p.job_state)}
+            ${p.job_days_since !== null && p.job_days_since !== undefined
+              ? `<span class="muted"> ${p.job_days_since}d since last insert</span>` : ''}</dd></div>
+          <div><dt>Cron entry</dt><dd>${cronBadge(p.cron_status)}</dd></div>
+          <div><dt>Server</dt><dd class="mono">${esc(p.server || '—')}</dd></div>
+          <div><dt>Frequency</dt><dd>${esc(p.frequency || '—')}</dd></div>
+          <div><dt>Last record created</dt><dd>${esc(p.last_created || '—')}</dd></div>
+          <div><dt>In partner feed</dt><dd>${p.partner_feed_count === null
+            ? '<span class="muted">not reported</span>' : fmtNum(p.partner_feed_count)}</dd></div>
+        </dl>
+        ${p.note ? `<div class="notice info" style="margin-top:var(--s4)">
+          <div class="body">${esc(p.note)}</div></div>` : ''}
+      </div>
+      ${statusLegend(['partner', 'jobs', 'cron_entry'], 'What these statuses mean')}
+    </div>`;
+}
+
+/* -------------------------------------------------------------- jobs */
+
+function jobsHTML(data) {
+  if (!data) return '';
+  const ing = data.ingest || {};
+  const head = `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head"><h2>Ingest freshness</h2>
+        <span class="hint">measured from the newest record, not from the crontab</span></div>
+      <div class="panel-body">
+        <dl class="detail-grid">
+          <div><dt>State</dt><dd>${jobBadge(ing.job_state)}</dd></div>
+          <div><dt>Days since last insert</dt><dd>${ing.job_days_since ?? '—'}</dd></div>
+          <div><dt>Expected interval</dt><dd>${ing.job_expected_days
+            ? `${ing.job_expected_days} days` : '—'}</dd></div>
+          <div><dt>Cron entry</dt><dd>${cronBadge(ing.cron_status)}</dd></div>
+          <div><dt>Frequency</dt><dd>${esc(ing.frequency || '—')}</dd></div>
+          <div><dt>Server</dt><dd class="mono">${esc(ing.server || '—')}</dd></div>
+        </dl>
+      </div>
+    </div>`;
+
+  if (!data.categories.length) {
+    return head + `<div class="panel"><div class="panel-body">${emptyState(
+      'No crontab entries for this partner',
+      'Either this partner has no scheduled job, or its server has not reported its crontab yet.')}</div></div>`;
+  }
+
+  // Grouped by what the job is FOR. Every cron line used to be presented as a
+  // data insertion, which most of them are not.
+  return head + data.categories.map((cat) => `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head">
+        <h2>${esc(cat.label)} <span class="n muted">${cat.jobs.length}</span></h2>
+        <span class="hint">${esc(cat.detail)}</span>
+      </div>
+      <div class="table-scroll" style="--table-max-h:none">
+        <table>
+          <thead><tr>
+            <th class="sticky-col">Job</th><th>Runs</th><th>Last output</th><th>Status</th>
+          </tr></thead>
+          <tbody>
+            ${cat.jobs.map((j) => `<tr>
+              <td class="sticky-col name">${esc(j.name || '—')}
+                <div class="sub mono" style="max-width:52ch;white-space:normal">${esc(j.command || '')}</div></td>
+              <td>${esc(j.schedule_human || j.schedule || '—')}</td>
+              <td>${j.log_age_days === null || j.log_age_days === undefined
+                ? '<span class="muted">no log</span>'
+                : `${j.log_age_days}d ago${j.log_size === 0
+                    ? '<div class="sub" style="color:var(--warn)">empty</div>' : ''}`}</td>
+              <td>${j.disabled ? badge('idle', 'DISABLED', 'cron') : badge('ok', 'ACTIVE', 'cron')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`).join('');
+}
+
+/* -------------------------------------------------------------- logs */
+
+const FEED_MARK = { ok: '●', warn: '◆', bad: '▲', info: '■' };
+
+function logsHTML(data) {
+  if (!data) return '';
+  const s = data.summary || {};
+  if (!data.entries.length) {
+    return `<div class="panel"><div class="panel-body">${emptyState(
+      'Nothing recorded for this partner yet',
+      'Entries appear here as counts are collected, sheets are compared and this partner’s cron jobs write output.')}</div></div>`;
+  }
+  return `<div class="panel">
+    <div class="panel-head">
+      <h2>Process logs</h2>
+      <span class="hint">${fmtNum(s.total)} entries${s.errors
+        ? ` · <span style="color:var(--bad)">${s.errors} error${s.errors === 1 ? '' : 's'}</span>` : ''}
+        ${s.warnings ? ` · ${s.warnings} warning${s.warnings === 1 ? '' : 's'}` : ''}</span>
+    </div>
+    <div class="table-scroll" style="--table-max-h:64vh">
+      <div class="feed">
+        ${data.entries.map((e) => `<div class="feed-item ${esc(e.level)}">
+          <span class="mark" aria-hidden="true">${FEED_MARK[e.level] || '■'}</span>
+          <span class="msg">${esc(e.message)}</span>
+          <span class="at" title="${esc(e.time || '')}">${timeAgo(e.ts)}</span>
+          ${e.detail ? `<span class="detail">${esc(e.detail)}</span>` : ''}
+          <span class="tag"><span class="chip">${esc(e.source)}</span></span>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------- files */
+
+function exportPanel(data) {
+  const running = (data.generated || []).find((f) =>
+    f.status === 'queued' || f.status === 'running');
+  const done = (data.generated || []).filter((f) => f.status === 'done');
+
+  if (running) {
+    // The expected total comes from the last hourly count, so it is an
+    // estimate and the live figure can pass it. Once it does, the estimate is
+    // simply dropped rather than shown as "1,913 of 1,107", which reads as a
+    // bug - and the bar goes indeterminate because a percentage of a number we
+    // have already exceeded means nothing.
+    const rows = running.rows || 0;
+    const total = running.total && rows <= running.total ? running.total : null;
+    const pct = total ? (100 * rows) / total : null;
+    return `<div class="panel-body">
+      <div style="font-weight:600;margin-bottom:var(--s2)">Generating…</div>
+      <div class="progress ${pct === null ? 'indeterminate' : ''}">
+        <div class="bar" style="${pct === null ? '' : `width:${pct}%`}"></div>
+      </div>
+      <div class="sub" style="margin-top:var(--s2)">
+        ${fmtNum(rows)}${total ? ` of about ${fmtNum(total)}` : ''} events written
+      </div>
+    </div>`;
+  }
+
+  return `<div class="panel-body">
+    <div style="display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center">
+      <select id="export-scope" aria-label="Which records to include">
+        <option value="all">Every record we hold</option>
+        <option value="live">Live only (published, today forward)</option>
+        <option value="unpublished">Not published only</option>
+      </select>
+      <button class="primary" id="generate-csv">Generate CSV</button>
+      <span class="muted">The real event rows, built fresh from the database.</span>
+    </div>
+    ${done.length ? `<div style="display:grid;gap:var(--s2);margin-top:var(--s4)">
+      ${done.map(fileRow).join('')}
+    </div>` : `<div class="sub" style="margin-top:var(--s3)">
+      Nothing generated yet. Large partners take a few minutes — generation runs
+      in the background and you can leave this page.</div>`}
+  </div>`;
+}
+
+function fileRow(f) {
+  return `<div style="display:flex;align-items:center;gap:var(--s3);
+       padding:var(--s2) var(--s3);border:1px solid var(--border);border-radius:var(--radius)">
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:600;overflow-wrap:anywhere">${esc(f.name)}</div>
+      <div class="sub" style="white-space:normal">${esc(f.detail || '')}</div>
+    </div>
+    ${f.available === false
+      ? '<span class="badge idle" title="The file is no longer on disk">GONE</span>'
+      : `<a class="btn small" href="${esc(f.href)}" download>Download</a>`}
+  </div>`;
+}
+
+function filesHTML(data) {
+  if (!data) return '';
+  const group = (title, hint, items, empty) => `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head"><h2>${esc(title)}</h2><span class="hint">${esc(hint)}</span></div>
+      ${items.length
+        ? `<div class="panel-body" style="display:grid;gap:var(--s2)">${items.map(fileRow).join('')}</div>`
+        : `<div class="panel-body">${emptyState(empty, '')}</div>`}
+    </div>`;
+
+  return `
+    <div class="panel" style="margin-bottom:var(--s4)">
+      <div class="panel-head"><h2>Event CSV</h2>
+        <span class="hint">every field we hold, one row per event</span></div>
+      ${exportPanel(data)}
+    </div>
+    ${group('Comparison results', 'the rows behind the missing / extra counts',
+            data.comparisons, 'No comparison has been run for this partner')}
+    ${group('Uploaded spreadsheets', 'kept so a comparison can be checked',
+            data.uploads, 'No spreadsheets uploaded for this partner')}
+    ${group('Count history', 'one row per collection — not the event data',
+            [data.history], '')}`;
+}
+
+/* Polls only while an export is actually running, and stops as soon as it is
+ * not - a page left open on the Files tab must not poll forever. */
+let exportTimer = null;
+
+function wireFiles() {
+  const btn = document.getElementById('generate-csv');
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      const scope = document.getElementById('export-scope').value;
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      try {
+        await postJSON(
+          `/api/partners/${encodeURIComponent(SELECTED)}/export?scope=${scope}`);
+        toast('Generating CSV in the background', 'ok');
+        await refreshFiles();
+      } catch (err) {
+        toast(err.message, 'bad');
+        btn.disabled = false;
+        btn.textContent = 'Generate CSV';
+      }
+    });
+  }
+
+  clearInterval(exportTimer);
+  const busy = (tabCache.files.generated || []).some((f) =>
+    f.status === 'queued' || f.status === 'running');
+  if (busy) exportTimer = setInterval(refreshFiles, 2000);
+}
+
+async function refreshFiles() {
+  if (ACTIVE_TAB !== 'files' || !SELECTED) { clearInterval(exportTimer); return; }
+  const partner = SELECTED;
+  const data = await getJSON(`/api/partners/${encodeURIComponent(partner)}/files`);
+  if (SELECTED !== partner || ACTIVE_TAB !== 'files') return;
+  tabCache.files = data;
+  document.getElementById('tab-body').innerHTML = filesHTML(data);
+  wireFiles();
+}
+
+/* ------------------------------------------------------------ issues */
+
+function issuesHTML(p) {
+  if (!p) return '';
+  if (!p.issues || !p.issues.length) {
+    return `<div class="panel"><div class="panel-body">${emptyState(
+      'No open issues',
+      'Counts are current, the ingest job is on schedule, and records are live.')}</div></div>`;
+  }
+  return `<div class="panel">
+    <div class="panel-head"><h2>Issues</h2>
+      <span class="hint">${p.issues.length} open, worst first</span></div>
+    <div class="table-scroll" style="--table-max-h:none">
+      <table>
+        <thead><tr>
+          <th class="sticky-col">Severity</th><th>Issue</th><th>Since</th>
+        </tr></thead>
+        <tbody>
+          ${p.issues.map((i) => `<tr>
+            <td class="sticky-col">${severityBadge(i.severity)}</td>
+            <td><span style="font-weight:600">${esc(i.title)}</span>
+              <div class="sub" style="max-width:70ch;white-space:normal">${esc(i.detail)}</div></td>
+            <td class="nowrap muted">${i.since ? timeAgo(i.since) : '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  ${p.error ? `<div class="panel" style="margin-top:var(--s4)">
+    <div class="panel-head"><h2>Last error</h2></div>
+    <div class="panel-body"><pre class="log-line">${esc(p.error)}</pre></div>
+  </div>` : ''}`;
+}
+
+/* ------------------------------------------------------------- wiring */
+
+async function loadPartner(name, keepTab = false) {
+  if (SELECTED !== name) {
+    // A different partner: every cached tab belongs to the old one.
+    tabCache = {};
+    clearInterval(exportTimer);
+    if (!keepTab) ACTIVE_TAB = 'overview';
+  }
+  SELECTED = name;
+  renderList();
+  history.replaceState(null, '', `/partners/${encodeURIComponent(name)}#${ACTIVE_TAB}`);
+
+  try {
+    const { partner } = await getJSON(`/api/partners/${encodeURIComponent(name)}`);
+    if (SELECTED !== name) return;
+    tabCache.partner = partner;
+    renderDetailShell(partner);
+    renderTab();
+  } catch (err) {
+    document.getElementById('detail').innerHTML =
+      `<div class="notice bad"><div class="body">${esc(err.message)}</div></div>`;
+  }
+}
+
+document.getElementById('partner-list').addEventListener('click', (e) => {
+  const item = e.target.closest('[data-partner]');
+  if (item) loadPartner(item.dataset.partner);
+});
+
+document.getElementById('partner-search').addEventListener('input', (e) => {
+  filter.query = e.target.value.trim().toLowerCase();
+  renderList();
+});
+
+document.querySelectorAll('.pill[data-status]').forEach((pill) => {
+  pill.addEventListener('click', () => {
+    const status = pill.dataset.status;
+    if (filter.statuses.has(status)) filter.statuses.delete(status);
+    else filter.statuses.add(status);
+    pill.classList.toggle('active', filter.statuses.has(status));
+    pill.setAttribute('aria-pressed', String(filter.statuses.has(status)));
+    renderList();
+  });
 });
 
 async function refresh() {
-  const data = await getJSON('/api/partners');
-  table.setRows(data.partners);
+  const data = await getJSON('/api/overview');
+  PARTNERS = data.cards;
 
-  // Populate the server filter from the data rather than hardcoding it, so a
-  // new server appears on its own.
-  const select = document.querySelector('[data-role="filter"][data-key="server"]');
-  if (select && select.options.length <= 1) {
-    const servers = [...new Set(data.partners.map((p) => p.server || '—'))].sort();
-    for (const server of servers) {
-      select.add(new Option(server, server));
+  if (!SELECTED) {
+    // Deep link first, then whatever needs attention most - landing on an
+    // empty pane would waste the one click the layout is built around.
+    const wanted = INITIAL_PARTNER
+      && PARTNERS.find((p) => p.name === INITIAL_PARTNER);
+    const first = wanted || PARTNERS.slice().sort((a, b) =>
+      ({ failed: 0, warning: 1, running: 2, success: 3 }[a.status]
+       - { failed: 0, warning: 1, running: 2, success: 3 }[b.status])
+      || a.name.localeCompare(b.name))[0];
+    if (first) {
+      const hash = (location.hash || '').slice(1);
+      if (TABS.some((t) => t.key === hash)) ACTIVE_TAB = hash;
+      await loadPartner(first.name, true);
+      return;
     }
   }
+  renderList();
 }
 
 wireAction('refresh-all', '/api/counts/refresh', refresh, { busy: 'Counting…' });

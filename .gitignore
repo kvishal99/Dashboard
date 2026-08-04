@@ -14,3 +14,7 @@ ops.db.backup-*
 
 # Uploaded partner spreadsheets - data, not code, and potentially large.
 uploads/
+
+# Generated partner event CSVs. Large (one wcities export is 120 MB), always
+# reproducible from the database, and pruned after export_keep_days.
+exports/

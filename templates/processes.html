@@ -96,12 +96,12 @@ async function loadCron() {
     hint: `${fmtNum(data.summary.total)} lines from ${data.summary.servers} servers ·
            ${fmtNum(data.summary.disabled)} commented out`,
     rows: data.jobs,
-    searchKeys: ['name', 'command', 'partner', 'server', 'schedule_human'],
+    searchKeys: ['name', 'command', 'partner', 'server', 'schedule_human', 'category_label'],
     searchPlaceholder: 'Search jobs, paths or partners…',
     exportHref: '/download/cron.csv',
     pageSize: 50,
     maxHeight: '62vh',
-    sort: { key: 'server', dir: 'asc' },
+    sort: { key: 'category', dir: 'asc' },
     emptyTitle: 'No crontabs collected',
     emptyDetail: 'Each server pushes its own crontab every 6 hours.',
     legend: statusLegend('cron'),
@@ -111,6 +111,14 @@ async function loadCron() {
       { key: 'no-log', label: 'No log redirect', test: (r) => !r.log_file },
     ],
     filters: [
+      // These jobs are not all the same kind of work. Filing every one of them
+      // under "data insertion" - which is what the old page did by not asking -
+      // made an insert job going quiet look the same as a report generator
+      // going quiet, and only one of those is an outage.
+      { key: 'category', label: 'Category',
+        options: data.categories
+          .filter((c) => c.count)
+          .map((c) => ({ value: c.key, label: `${c.label} (${c.count})` })) },
       { key: 'server', label: 'Server',
         options: data.servers.map((s) => ({ value: s.server, label: `${s.server} (${s.jobs})` })) },
     ],
@@ -119,6 +127,7 @@ async function loadCron() {
     expand: (r) => `<dl class="detail-grid">
         <div style="grid-column:1/-1"><dt>Full command</dt>
           <dd class="mono" style="white-space:pre-wrap">${esc(r.command)}</dd></div>
+        <div><dt>Category</dt><dd>${esc(r.category_label || 'Other')}</dd></div>
         <div><dt>Schedule</dt><dd class="mono">${esc(r.schedule || '—')}</dd></div>
         <div><dt>In plain English</dt><dd>${esc(r.schedule_human || '—')}</dd></div>
         <div><dt>Script</dt><dd class="mono">${esc(r.script || '—')}</dd></div>
@@ -132,6 +141,8 @@ async function loadCron() {
     columns: [
       { key: 'name', label: 'Job', sticky: true, sortDefault: 'asc',
         render: (r) => `<span style="font-weight:600">${esc(r.name || '—')}</span>` },
+      { key: 'category', label: 'Category', sortDefault: 'asc',
+        render: (r) => `<span class="chip">${esc(r.category_label || 'Other')}</span>` },
       { key: 'server', label: 'Server', sortDefault: 'asc',
         render: (r) => `<span class="chip">${esc(r.server)}</span>` },
       { key: 'schedule_human', label: 'Runs', sortDefault: 'asc',
@@ -219,8 +230,10 @@ function renderTiles(pm2, cronSummary, siteRows) {
     { label: 'Processes errored', value: fmtNum(errored),
       sub: errored ? 'crashed or failed to start' : 'none',
       cls: errored ? 'is-bad' : 'is-ok' },
-    { label: 'Cron jobs', value: fmtNum(cronSummary.total),
-      sub: `${fmtNum(cronSummary.disabled)} commented out · ${cronSummary.servers} servers` },
+    { label: 'Import jobs', value: fmtNum((cronSummary.by_category || {}).import),
+      sub: `of ${fmtNum(cronSummary.total)} cron lines · ${cronSummary.servers} servers` },
+    { label: 'Scrapers', value: fmtNum((cronSummary.by_category || {}).scraper),
+      sub: `${fmtNum((cronSummary.by_category || {}).csv)} CSV / report jobs` },
     { label: 'Sites down', value: fmtNum(down),
       sub: `of ${fmtNum(siteRows.length)} monitored`,
       cls: down ? 'is-bad' : 'is-ok' },

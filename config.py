@@ -1,9 +1,10 @@
 """Loads config.yaml (plus .env / environment overrides)."""
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import yaml
 
+import event_export
 from alerts import AlertSettings, SmtpSettings
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -59,7 +60,13 @@ APP_DEFAULTS = {
     "upload_dir": "uploads",
     "max_upload_mb": 25,
     "max_compare_rows": 100_000,
-    # The dashboard's own log, which the Logs page reads.
+    # Generated per-partner event CSVs. Unlike the comparison cap above,
+    # max_export_rows is a truncation point rather than a refusal: a partial
+    # event export is still a usable file, and the UI states the row count.
+    "export_dir": "exports",
+    "export_keep_days": 7,
+    "max_export_rows": 0,
+    # The dashboard's own log, read per partner on the partner's Logs tab.
     "log_file": "dashboard.log",
     "log_level": "INFO",
 }
@@ -143,6 +150,28 @@ def _build_alerts(raw: Dict[str, Any]) -> AlertSettings:
     )
 
 
+def _event_columns(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """The event CSV's columns, as (field, header) pairs.
+
+    Accepts either a two-item list (`[id, "Event ID"]`) or a bare string, in
+    which case the field name doubles as the header. A malformed or absent
+    block falls back to the default rather than producing a file with no
+    columns, because an empty CSV looks like "the partner has no events".
+    """
+    configured = raw.get("event_columns")
+    if not configured:
+        return list(event_export.DEFAULT_COLUMNS)
+
+    columns: List[Tuple[str, str]] = []
+    for entry in configured:
+        if isinstance(entry, str):
+            columns.append((entry, entry))
+        elif isinstance(entry, (list, tuple)) and entry:
+            key = str(entry[0])
+            columns.append((key, str(entry[1]) if len(entry) > 1 else key))
+    return columns or list(event_export.DEFAULT_COLUMNS)
+
+
 class Config:
     def __init__(self, raw: Dict[str, Any]):
         self.raw = raw
@@ -179,6 +208,9 @@ class Config:
         self.upload_dir: str = self._resolve(app["upload_dir"])
         self.max_upload_bytes: int = int(float(app["max_upload_mb"]) * 1024 * 1024)
         self.max_compare_rows: int = int(app["max_compare_rows"])
+        self.export_dir: str = self._resolve(app["export_dir"])
+        self.export_keep_days: int = int(app["export_keep_days"])
+        self.max_export_rows: int = int(app["max_export_rows"])
         self.log_file: str = self._resolve(app["log_file"]) if app["log_file"] else ""
         self.log_level: str = str(app["log_level"]).upper()
 
@@ -189,6 +221,13 @@ class Config:
         self.database["port"] = int(self.database.get("port", 3306))
 
         self.queries: Dict[str, str] = raw.get("queries") or {}
+
+        # Which columns the generated event CSV carries. Configured rather than
+        # coded so the file can be lined up with whichever spreadsheet the team
+        # reconciles against. Falls back to the module default, so an older
+        # config.yaml still produces a usable export instead of an empty one.
+        self.event_columns: List[Tuple[str, str]] = _event_columns(raw.get("exports") or {})
+
         self.websites: List[Dict[str, Any]] = raw.get("websites") or []
         self.alerts: AlertSettings = _build_alerts(raw.get("alerts") or {})
 

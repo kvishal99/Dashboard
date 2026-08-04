@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
     name          TEXT,               -- short human label, e.g. marriott_mvc/mvc.sh
     script        TEXT,               -- the path being run
     partner       TEXT,               -- guessed from the path, may be null
+    -- What KIND of job this is: health | scraper | import | csv | maintenance |
+    -- other. Every line used to be presented as a data insertion, which is what
+    -- most of these are not - see cron_parse.CATEGORIES.
+    category      TEXT,
     log_file      TEXT,               -- redirect target, if the line has one
     log_mtime     REAL,               -- when that file was last written
     log_size      INTEGER,
@@ -176,6 +180,31 @@ CREATE TABLE IF NOT EXISTS alert_log (
     sent_at     REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_alert_log_time ON alert_log (sent_at DESC);
+
+-- A request to build a partner's event CSV from the database.
+--
+-- Kept as a job rather than generated inside the request because a large
+-- partner is hundreds of thousands of rows: fever alone would hold a worker
+-- for minutes and time the browser out long before the file existed. The row
+-- carries its own progress, so the page can show "42,000 of 862,976" instead
+-- of a spinner that says nothing.
+CREATE TABLE IF NOT EXISTS event_exports (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    partner      TEXT NOT NULL,
+    scope        TEXT NOT NULL DEFAULT 'all',  -- all | live | unpublished
+    status       TEXT NOT NULL,                -- queued | running | done | failed
+    rows_written INTEGER NOT NULL DEFAULT 0,
+    total_rows   INTEGER,                      -- expected, from the count we hold
+    filename     TEXT,
+    stored_path  TEXT,
+    size_bytes   INTEGER,
+    error        TEXT,
+    requested_at REAL NOT NULL,
+    started_at   REAL,
+    finished_at  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_export_partner
+    ON event_exports (partner, id DESC);
 """
 
 
@@ -205,6 +234,13 @@ class Store:
                 conn.execute("ALTER TABLE partner_counts ADD COLUMN db_past INTEGER")
             if "last_created" not in existing:
                 conn.execute("ALTER TABLE partner_counts ADD COLUMN last_created TEXT")
+
+            # Cron rows collected before jobs were categorised. Left NULL rather
+            # than back-filled with a guess: the next push from each server
+            # re-parses every line and fills it in properly.
+            cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)")}
+            if cron_cols and "category" not in cron_cols:
+                conn.execute("ALTER TABLE cron_jobs ADD COLUMN category TEXT")
 
     # -------------------------------------------------------- partner counts
 
@@ -333,13 +369,14 @@ class Store:
             conn.executemany(
                 """INSERT INTO cron_jobs
                    (server, hostname, line_no, schedule, schedule_human, command,
-                    name, script, partner, log_file, log_mtime, log_size, disabled,
-                    collected_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    name, script, partner, category, log_file, log_mtime,
+                    log_size, disabled, collected_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(server, hostname, r.get("line_no"), r.get("schedule"),
                   r.get("schedule_human"), r["command"], r.get("name"),
                   r.get("script"),
-                  r.get("partner"), r.get("log_file"), r.get("log_mtime"),
+                  r.get("partner"), r.get("category"), r.get("log_file"),
+                  r.get("log_mtime"),
                   r.get("log_size"), 1 if r.get("disabled") else 0, now)
                  for r in rows],
             )
@@ -349,6 +386,21 @@ class Store:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM cron_jobs ORDER BY server, line_no"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cron_jobs_for_partner(self, partner: str) -> List[Dict[str, Any]]:
+        """Only this partner's crontab lines - matched case-insensitively.
+
+        The partner-centric pages exist so that opening WCities shows WCities'
+        jobs and nothing else, so the filter belongs in the query rather than in
+        every caller.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM cron_jobs WHERE LOWER(partner) = LOWER(?)
+                   ORDER BY server, line_no""",
+                (partner,),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -562,6 +614,94 @@ class Store:
                 (comparison_id, side),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------------------------------------------------------- event exports
+
+    def create_export(self, partner: str, scope: str = "all",
+                      total_rows: Optional[int] = None) -> int:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO event_exports
+                   (partner, scope, status, total_rows, requested_at)
+                   VALUES (?,?,'queued',?,?)""",
+                (partner, scope, total_rows, time.time()),
+            )
+        return cursor.lastrowid
+
+    def update_export(self, export_id: int, **fields: Any) -> None:
+        """Patch an export row. Only known columns, so a typo cannot write SQL."""
+        allowed = {
+            "status", "rows_written", "total_rows", "filename", "stored_path",
+            "size_bytes", "error", "started_at", "finished_at",
+        }
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        assignments = ", ".join(f"{k} = ?" for k in sets)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE event_exports SET {assignments} WHERE id = ?",
+                list(sets.values()) + [export_id],
+            )
+
+    def export(self, export_id: int) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM event_exports WHERE id = ?", (export_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def exports(self, partner: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM event_exports"
+        params: tuple = ()
+        if partner:
+            sql += " WHERE partner = ?"
+            params = (partner,)
+        sql += " ORDER BY id DESC LIMIT ?"
+        with self._conn() as conn:
+            rows = conn.execute(sql, params + (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_export(self, partner: str) -> Optional[Dict[str, Any]]:
+        found = self.exports(partner, limit=1)
+        return found[0] if found else None
+
+    def active_export(self, partner: str) -> Optional[Dict[str, Any]]:
+        """A queued or running export for this partner, if one exists.
+
+        Used to make the Generate button idempotent: pressing it twice must
+        join the run already in progress rather than start a second scan of the
+        same partner.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM event_exports
+                   WHERE partner = ? AND status IN ('queued','running')
+                   ORDER BY id DESC LIMIT 1""",
+                (partner,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_export(self, export_id: int) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM event_exports WHERE id = ?", (export_id,))
+
+    def reset_running_exports(self) -> int:
+        """Fail any export left mid-run by a restart.
+
+        A row stuck at `running` with no process behind it would leave the page
+        polling for a file that will never appear, and would block the next
+        request through active_export().
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """UPDATE event_exports
+                   SET status = 'failed', finished_at = ?,
+                       error = 'the dashboard restarted while this export was running'
+                   WHERE status IN ('queued','running')""",
+                (time.time(),),
+            )
+        return cursor.rowcount
 
     # ------------------------------------------------------------ site checks
 

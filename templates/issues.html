@@ -3,26 +3,25 @@
 {% block heading %}Issues{% endblock %}
 
 {% block content %}
-<div class="page-intro">
-  <div>
-    <p>
-      Everything currently wrong, worst first — across partners, websites and
-      processes. These are the same issues the partner cards count, so a card
-      reading “4 issues” and the four rows here are the same four things.
-    </p>
-  </div>
-</div>
+{#
+  Everything currently wrong, worst first.
 
+  The old version of this page put Severity, Subject, Issue, Area and Count side
+  by side, which mixed two different questions - "what broke" and "how big is
+  it" - and answered neither well. It now shows one thing per column, and only
+  the things you act on: which process, what it said, when it last ran, what
+  state it is in, and the button that runs it again.
+#}
 <div class="tiles" id="tiles"></div>
 <div id="table"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-const SEVERITY_CLASS = { critical: 'bad', warning: 'warn', info: 'info' };
-
 const table = new DataTable('#table', {
-  searchKeys: ['subject', 'title', 'detail'],
+  title: 'Open issues',
+  hint: 'worst first',
+  searchKeys: ['process', 'title', 'detail', 'subject'],
   searchPlaceholder: 'Search issues…',
   exportHref: '/download/issues.csv',
   pageSize: 50,
@@ -42,31 +41,27 @@ const table = new DataTable('#table', {
       { value: 'system', label: 'System' },
     ] },
   ],
-  // Every issue explains itself in full when opened, rather than being
-  // truncated into a column that has no room for it.
-  expand: (r) => `<div class="notice ${SEVERITY_CLASS[r.severity] || 'info'}">
-      <div class="body"><strong>${esc(r.title)}</strong><br>${esc(r.detail)}</div>
-    </div>
-    <dl class="detail-grid" style="margin-top:var(--s3)">
-      <div><dt>Area</dt><dd>${esc(r.scope)}</dd></div>
-      <div><dt>Subject</dt><dd>${esc(r.subject)}</dd></div>
-      <div><dt>Kind</dt><dd><span class="chip">${esc(r.kind)}</span></dd></div>
-      <div><dt>Since</dt><dd>${r.since ? fmtTime(r.since) : 'not recorded'}</dd></div>
-    </dl>
-    ${r.link ? `<div style="margin-top:var(--s3)"><a class="btn small primary" href="${esc(r.link)}">Go to ${esc(r.subject)} →</a></div>` : ''}`,
   columns: [
-    { key: 'severity', label: 'Severity', sticky: true, sortDefault: 'asc',
-      sortValue: (r) => r.rank, render: (r) => severityBadge(r.severity) },
-    { key: 'subject', label: 'Subject', sortDefault: 'asc',
+    { key: 'process', label: 'Process', sticky: true, sortDefault: 'asc',
       render: (r) => (r.link
-        ? `<a href="${esc(r.link)}">${esc(r.subject)}</a>`
-        : esc(r.subject)) },
-    { key: 'title', label: 'Issue', sortDefault: 'asc',
+        ? `<a href="${esc(r.link)}" style="font-weight:600">${esc(r.process)}</a>`
+        : `<span style="font-weight:600">${esc(r.process)}</span>`) },
+    { key: 'title', label: 'Error', sortDefault: 'asc',
       render: (r) => `<span style="font-weight:600">${esc(r.title)}</span>
-        <div class="sub" style="max-width:70ch;white-space:normal">${esc(r.detail)}</div>` },
-    { key: 'scope', label: 'Area', render: (r) => `<span class="chip">${esc(r.scope)}</span>` },
-    { key: 'value', label: 'Count', num: true,
-      render: (r) => (r.value ? fmtNum(Math.round(r.value)) : '<span class="muted">—</span>') },
+        <div class="sub" style="max-width:64ch;white-space:normal">${esc(r.detail)}</div>` },
+    { key: 'last_run', label: 'Last run',
+      render: (r) => (r.last_run
+        ? `<span class="nowrap muted" title="${esc(fmtTime(r.last_run))}">${timeAgo(r.last_run)}</span>`
+        : '<span class="muted">never</span>') },
+    { key: 'severity', label: 'Status', sortValue: (r) => r.rank, sortDefault: 'asc',
+      render: (r) => severityBadge(r.severity) },
+    // Only rendered where re-running is a meaningful response. A retry button
+    // that cannot help is worse than no button, so a PM2 process that this
+    // dashboard has no way to restart simply shows a dash.
+    { key: 'retry', label: 'Retry', sortable: false,
+      render: (r) => (r.retry
+        ? `<button class="small" data-retry="${esc(r.retry)}" data-label="${esc(r.process)}">Run again</button>`
+        : '<span class="muted">—</span>') },
   ],
 });
 
@@ -79,10 +74,28 @@ function renderTiles(s) {
       cls: s.critical ? 'is-bad' : 'is-ok' },
     { label: 'Warning', value: fmtNum(s.warning), sub: 'degraded or overdue',
       cls: s.warning ? 'is-warn' : '' },
-    { label: 'Info', value: fmtNum(s.info), sub: 'worth knowing, not a fault', cls: 'is-info' },
-    { label: 'Partners affected', value: fmtNum(s.partners_affected), sub: 'with at least one issue' },
+    { label: 'Partners affected', value: fmtNum(s.partners_affected),
+      sub: 'with at least one issue' },
   ]);
 }
+
+/* Delegated, because the table replaces its rows on every poll. */
+document.getElementById('table').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-retry]');
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  try {
+    await postJSON(btn.dataset.retry);
+    toast(`Re-ran ${btn.dataset.label}`, 'ok');
+    await refresh();
+  } catch (err) {
+    toast(err.message, 'bad');
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+});
 
 async function refresh() {
   const data = await getJSON('/api/issues');

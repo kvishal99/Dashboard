@@ -45,11 +45,13 @@ PARTNER_COLUMNS: List[Column] = [
 ]
 
 ISSUE_COLUMNS: List[Column] = [
-    ("severity", "Severity"),
+    ("severity", "Status"),
+    ("process", "Process"),
+    ("title", "Error"),
+    ("detail", "Detail"),
+    ("last_run_iso", "Last run"),
     ("scope", "Area"),
     ("subject", "Subject"),
-    ("title", "Issue"),
-    ("detail", "Detail"),
     ("kind", "Kind"),
     ("since_iso", "Since"),
 ]
@@ -67,6 +69,7 @@ CRON_COLUMNS: List[Column] = [
     ("server", "Server"),
     ("hostname", "Hostname"),
     ("name", "Job"),
+    ("category_label", "Category"),
     ("schedule", "Schedule"),
     ("schedule_human", "Schedule (plain)"),
     ("partner", "Partner"),

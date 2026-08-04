@@ -14,6 +14,7 @@ Each issue carries a severity, the partner or site it belongs to, a plain
 sentence saying what is wrong, and where to go about it.
 """
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 # Severity drives sort order and colour. Three levels only: a fourth invites
 # arguments about whether something is "medium", and the useful question on an
@@ -29,6 +30,8 @@ def _issue(
     severity: str, kind: str, scope: str, subject: str,
     title: str, detail: str, link: Optional[str] = None,
     value: Optional[Any] = None, since: Optional[float] = None,
+    last_run: Optional[float] = None, retry: Optional[str] = None,
+    process: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         # Stable enough to key a UI row on, and to dedupe across a refresh.
@@ -37,11 +40,20 @@ def _issue(
         "kind": kind,
         "scope": scope,
         "subject": subject,
+        # What actually ran and went wrong, named as a process rather than as a
+        # category. "Hourly count sweep" is something a person can go and look
+        # at; "partner" is not.
+        "process": process or subject,
         "title": title,
         "detail": detail,
         "link": link,
         "value": value,
         "since": since,
+        # When the thing that produced this issue last ran, and the endpoint
+        # that runs it again. `retry` is None wherever re-running is not a
+        # meaningful response - a button that cannot help is worse than none.
+        "last_run": last_run,
+        "retry": retry,
         "rank": SEVERITY_RANK[severity],
     }
 
@@ -55,6 +67,11 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     found: List[Dict[str, Any]] = []
     name = row["name"]
     link = f"/partners/{name}"
+    # Every partner issue shares these: the sweep is the process behind them,
+    # collected_at is when it last ran, and re-counting is the one action that
+    # can clear a stale or failed number.
+    ran = row.get("collected_at")
+    retry = f"/api/partners/{name}/refresh"
 
     # --- the counts themselves -------------------------------------------
     if row.get("ok") is False:
@@ -64,6 +81,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             row.get("error") or "The last count query against MySQL errored, so "
                                 "every number for this partner is stale.",
             link, since=row.get("collected_at"),
+            last_run=ran, retry=retry, process=f"{name} · hourly count sweep",
         ))
     elif row.get("ok") is None:
         found.append(_issue(
@@ -72,6 +90,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             "No counts have been collected for this partner yet. The MySQL "
             "sweep runs on the top of every hour.",
             link,
+            last_run=ran, retry=retry, process=f"{name} · hourly count sweep",
         ))
 
     # --- is the ingest job still running? ---------------------------------
@@ -92,6 +111,8 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                f", well past the {row.get('job_expected_days') or '?'}-day interval "
                f"its '{row.get('frequency') or 'unknown'}' schedule implies."),
             link, value=days,
+            last_run=ran, retry=retry,
+            process=f"{name} · ingest job ({row.get('frequency') or 'no schedule'})",
         ))
     elif state == "late":
         found.append(_issue(
@@ -101,6 +122,8 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"'{row.get('frequency') or 'unknown'}' schedule, but still inside "
             "the grace window.",
             link, value=row.get("job_overdue_by"),
+            last_run=ran, retry=retry,
+            process=f"{name} · ingest job ({row.get('frequency') or 'no schedule'})",
         ))
     elif state == "never":
         found.append(_issue(
@@ -109,6 +132,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             "This partner has no records at all - the ingest has never "
             "successfully run.",
             link,
+            last_run=ran, retry=retry, process=f"{name} · ingest job",
         ))
 
     # --- is anything actually live? ---------------------------------------
@@ -119,6 +143,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"We hold {row['feed_total']:,} records but none are published and "
             "still upcoming. The ingest is landing, but nothing is reaching the site.",
             link, value=row.get("feed_total"),
+            last_run=ran, retry=retry, process=f"{name} · publishing",
         ))
     elif row.get("unpublished_pct") is not None and row["unpublished_pct"] >= 50:
         found.append(_issue(
@@ -127,6 +152,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"{row.get('db_unpublished') or 0:,} of {row.get('feed_total') or 0:,} "
             f"records ({row['unpublished_pct']:.0f}%) inserted but never went live.",
             link, value=row.get("db_unpublished"),
+            last_run=ran, retry=retry, process=f"{name} · publishing",
         ))
 
     # --- spreadsheet vs database ------------------------------------------
@@ -141,8 +167,10 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"{comparison['missing']:,} of {comparison.get('sheet_total') or 0:,} "
                 f"rows in the partner spreadsheet have no match in our database "
                 f"(matched on {comparison.get('strategy_label')}).",
-                f"{link}#compare", value=comparison["missing"],
+                f"{link}#comparison", value=comparison["missing"],
                 since=comparison.get("computed_at"),
+                last_run=comparison.get("computed_at"),
+                process=f"{name} · spreadsheet comparison",
             ))
         if comparison.get("extra"):
             found.append(_issue(
@@ -151,8 +179,10 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"{comparison['extra']:,} records exist in our database with no "
                 "row in the partner spreadsheet - usually withdrawn tours that "
                 "were never removed on our side.",
-                f"{link}#compare", value=comparison["extra"],
+                f"{link}#comparison", value=comparison["extra"],
                 since=comparison.get("computed_at"),
+                last_run=comparison.get("computed_at"),
+                process=f"{name} · spreadsheet comparison",
             ))
         if comparison.get("reliable") is False:
             found.append(_issue(
@@ -161,7 +191,9 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                 f"Only {comparison.get('match_rate', 0) * 100:.0f}% of rows matched "
                 f"on {comparison.get('strategy_label')}. The missing/extra counts "
                 "above are probably measuring a column mismatch, not real gaps.",
-                f"{link}#compare",
+                f"{link}#comparison",
+                last_run=comparison.get("computed_at"),
+                process=f"{name} · spreadsheet comparison",
             ))
 
     found.sort(key=lambda i: i["rank"])
@@ -176,6 +208,9 @@ def for_site(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             row.get("error") or f"The last check failed "
                                 f"(HTTP {row.get('status_code') or 'no response'}).",
             "/processes#sites", since=row.get("checked_at"),
+            last_run=row.get("checked_at"),
+            retry=f"/api/sites/refresh?url={quote(row.get('url') or '', safe='')}",
+            process=f"{row['name']} · website health check",
         )]
     return []
 
@@ -190,6 +225,8 @@ def for_server(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             "so its process list is stale. Usually the agent or its tunnel is "
             "down rather than the box itself.",
             "/processes", since=row.get("last_updated"),
+            last_run=row.get("last_updated"),
+            process=f"{row['server_id']} · PM2 agent heartbeat",
         ))
     if row.get("errored_count"):
         found.append(_issue(
@@ -198,6 +235,8 @@ def for_server(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"{row['errored_count']} of {row.get('total_count', 0)} processes on "
             "this server are in an errored state - they crashed or failed to start.",
             "/processes", value=row["errored_count"],
+            last_run=row.get("last_updated"),
+            process=f"{row['server_id']} · PM2 processes",
         ))
     return found
 

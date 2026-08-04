@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Dashboard · Ops{% endblock %}
-{% block heading %}Dashboard{% endblock %}
+{% block title %}Overview · Ops{% endblock %}
+{% block heading %}Overview{% endblock %}
 
 {% block topbar %}
 <button id="refresh-all" class="small">Refresh counts</button>
@@ -8,53 +8,66 @@
 
 {% block content %}
 {#
-  The main dashboard, and the one page with a rule about what may go on it:
-  summary only. Six tiles and one card per partner - name, status, total
-  records, last updated, issue count. Nothing that needs a table, and nothing
-  that needs a second query.
+  Summary only, and one rule about what may go on it: nothing here needs a
+  second query, and nothing here is per-partner detail.
 
-  Everything else is one click away. Clicking a card opens a slide-over that
-  fetches that partner's detail at that moment, which is why 112 partners cost
-  the same to display as 12.
+  This page answers "is anything wrong, and with whom" and then hands you to
+  the partner workspace, which is where the work happens. It deliberately does
+  NOT duplicate the workspace's tabs - two places showing a partner's jobs is
+  how the two ended up disagreeing last time.
 #}
 
 <div class="tiles" id="tiles"></div>
 
-<div class="section">
-  <div class="section-head">
-    <h2>Partners</h2>
-    <span class="hint" id="card-count"></span>
+<div class="split">
+  <div>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Needs attention</h2>
+        <span class="hint" id="attention-count"></span>
+      </div>
+      <div class="table-scroll" style="--table-max-h:52vh">
+        <table>
+          <thead><tr>
+            <th class="sticky-col">Partner</th><th>Status</th><th>Last run</th>
+          </tr></thead>
+          <tbody id="attention"></tbody>
+        </table>
+      </div>
+      <div class="panel-body" style="border-top:1px solid var(--border)">
+        <a class="btn small" href="/partners">Open the partner workspace →</a>
+      </div>
+    </div>
   </div>
 
-  <div class="toolbar" style="border:1px solid var(--border);border-radius:var(--radius-lg) var(--radius-lg) 0 0;border-bottom:none">
-    <input type="search" id="card-search" placeholder="Search partners…" autocomplete="off" aria-label="Search partners">
-    <button class="pill" data-status="failed" aria-pressed="false">Failed <span class="n" id="n-failed"></span></button>
-    <button class="pill" data-status="warning" aria-pressed="false">Warning <span class="n" id="n-warning"></span></button>
-    <button class="pill" data-status="success" aria-pressed="false">Healthy <span class="n" id="n-success"></span></button>
-    <span class="spacer"></span>
-    <label class="check">
-      <input type="checkbox" id="sort-issues" checked> Problems first
-    </label>
-    <a class="btn small" href="/partners">Full table →</a>
-  </div>
-
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:0 0 var(--radius-lg) var(--radius-lg);padding:var(--s3)">
-    <div class="cards" id="cards"></div>
+  <div>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Worst issues right now</h2>
+        <span class="hint">worst first, across everything</span>
+      </div>
+      <div class="table-scroll" style="--table-max-h:52vh">
+        <table>
+          <thead><tr>
+            <th class="sticky-col">Process</th><th>Error</th><th>Status</th>
+          </tr></thead>
+          <tbody id="top-issues"></tbody>
+        </table>
+      </div>
+      <div class="panel-body" style="border-top:1px solid var(--border)">
+        <a class="btn small" href="/issues">Every issue →</a>
+      </div>
+    </div>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let CARDS = [];
-let SUMMARY = {};
-const filter = { query: '', statuses: new Set(), problemsFirst: true };
-
 function renderTiles(s) {
   const issues = s.issues || {};
   document.getElementById('tiles').innerHTML = tiles([
-    { label: 'Partners', value: fmtNum(s.partners),
-      sub: `${fmtNum(s.healthy)} healthy` },
+    { label: 'Partners', value: fmtNum(s.partners), sub: `${fmtNum(s.healthy)} healthy` },
     { label: 'Open issues', value: fmtNum(issues.total),
       sub: `${fmtNum(issues.critical)} critical · ${fmtNum(issues.warning)} warning`,
       cls: issues.critical ? 'is-bad' : (issues.warning ? 'is-warn' : 'is-ok') },
@@ -62,174 +75,61 @@ function renderTiles(s) {
       sub: `${fmtShort(s.feed_total) || '—'} held across all partners` },
     { label: 'Live records', value: fmtNum(s.db_future),
       sub: s.live_pct !== null ? `${fmtPct(s.live_pct)} of everything held` : 'published, today & future' },
-    { label: 'Missing from DB', value: fmtNum(s.total_missing),
-      sub: s.compared_partners
-        ? `across ${s.compared_partners} compared partner${s.compared_partners === 1 ? '' : 's'}`
-        : 'no spreadsheet compared yet',
-      cls: s.total_missing ? 'is-bad' : '' },
-    { label: 'Extra in DB', value: fmtNum(s.total_extra),
-      sub: s.compared_partners ? 'not in the partner sheet' : 'upload a sheet to compare',
-      cls: s.total_extra ? 'is-warn' : '' },
     { label: 'Sites down', value: fmtNum(s.sites_down),
       sub: `of ${fmtNum(s.sites_total)} monitored`,
       cls: s.sites_down ? 'is-bad' : 'is-ok' },
-    { label: 'Processes', value: fmtNum(s.processes_total),
-      sub: s.processes_errored ? `${fmtNum(s.processes_errored)} errored` : `${fmtNum(s.servers_total)} servers reporting`,
-      cls: s.processes_errored ? 'is-bad' : '' },
+    { label: 'Processes errored', value: fmtNum(s.processes_errored),
+      sub: `${fmtNum(s.servers_total)} servers reporting`,
+      cls: s.processes_errored ? 'is-bad' : 'is-ok' },
   ]);
 }
 
-/* One card. Exactly the five facts asked for, and no more - the temptation to
- * add "just one more number" is what turned the last version into a wall. */
-function cardHTML(c) {
-  const issueClass = !c.issue_count ? 'none' : (c.status === 'failed' ? 'some' : 'warn');
-  return `<button class="card status-${esc(c.status)}" data-partner="${esc(c.name)}">
-    <div class="card-top">
-      <span class="card-name" title="${esc(c.name)}">${esc(c.name)}</span>
-      ${partnerStatusBadge(c.status)}
-    </div>
-    <div class="card-stats">
-      <span class="card-stat">
-        <span class="k">Records</span>
-        <div class="v">${fmtNum(c.feed_total)}</div>
-      </span>
-      <span class="card-stat">
-        <span class="k">Live</span>
-        <div class="v">${fmtNum(c.db_future)}</div>
-      </span>
-      ${c.missing !== null && c.missing !== undefined ? `<span class="card-stat">
-        <span class="k">Missing</span>
-        <div class="v" style="color:var(--bad)">${fmtNum(c.missing)}</div>
-      </span>` : ''}
-    </div>
-    <div class="card-foot">
-      <span title="${esc(fmtTime(c.collected_at))}">Updated ${timeAgo(c.collected_at)}</span>
-      <span class="card-issues ${issueClass}">
-        ${c.issue_count ? `${c.issue_count} issue${c.issue_count === 1 ? '' : 's'}` : 'No issues'}
-      </span>
-    </div>
-  </button>`;
-}
-
-function renderCards() {
-  let rows = CARDS;
-  if (filter.query) {
-    rows = rows.filter((c) => c.name.toLowerCase().includes(filter.query));
-  }
-  if (filter.statuses.size) {
-    rows = rows.filter((c) => filter.statuses.has(c.status));
-  }
-
-  // Worst first by default: on a page meant to answer "who needs me?" in a few
-  // seconds, alphabetical order buries the answer somewhere around letter M.
+/* Compact by design: name, status, last run. Anything more belongs on the
+ * partner's own page, one click away. */
+function renderAttention(cards) {
   const rank = { failed: 0, warning: 1, running: 2, success: 3 };
-  rows = rows.slice().sort((a, b) => (filter.problemsFirst
-    ? (rank[a.status] - rank[b.status]) || (b.issue_count - a.issue_count)
-      || a.name.localeCompare(b.name)
-    : a.name.localeCompare(b.name)));
+  const rows = cards
+    .filter((c) => c.status === 'failed' || c.status === 'warning')
+    .sort((a, b) => (rank[a.status] - rank[b.status])
+      || (b.issue_count - a.issue_count) || a.name.localeCompare(b.name));
 
-  document.getElementById('card-count').textContent =
-    rows.length === CARDS.length
-      ? `${fmtNum(CARDS.length)} partners`
-      : `${fmtNum(rows.length)} of ${fmtNum(CARDS.length)}`;
+  document.getElementById('attention-count').textContent = rows.length
+    ? `${fmtNum(rows.length)} of ${fmtNum(cards.length)} partners`
+    : 'every partner healthy';
 
-  document.getElementById('cards').innerHTML = rows.length
-    ? rows.map(cardHTML).join('')
-    : emptyState('No partners match', 'Try clearing the search or status filters.');
-
-  for (const status of ['failed', 'warning', 'success']) {
-    document.getElementById(`n-${status}`).textContent =
-      CARDS.filter((c) => c.status === status).length;
-  }
+  document.getElementById('attention').innerHTML = rows.length
+    ? rows.map((c) => `<tr>
+        <td class="sticky-col name">
+          <a href="/partners/${encodeURIComponent(c.name)}">${esc(c.name)}</a>
+          ${c.worst_issue ? `<div class="sub" style="max-width:34ch">${esc(c.worst_issue)}</div>` : ''}
+        </td>
+        <td>${partnerStatusBadge(c.status)}</td>
+        <td class="nowrap muted" title="${esc(fmtTime(c.collected_at))}">${timeAgo(c.collected_at)}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="3">${emptyState('Nothing needs attention',
+        'Every partner is counted, on schedule and publishing.')}</td></tr>`;
 }
 
-/* Opening a partner fetches its detail then, not before. That is the whole
- * reason the front page stays cheap. */
-async function openPartner(name) {
-  SlideOver.open(name, '<div class="skeleton" style="height:120px"></div>',
-    `<a class="btn primary" href="/partners/${encodeURIComponent(name)}">Open full page</a>
-     <a class="btn" href="/download/partner/${encodeURIComponent(name)}/history.csv" download>Download history</a>`);
-  try {
-    const { partner } = await getJSON(`/api/partners/${encodeURIComponent(name)}`);
-    SlideOver.setBody(partnerSummaryHTML(partner));
-  } catch (err) {
-    SlideOver.setBody(`<div class="notice bad"><div class="body">${esc(err.message)}</div></div>`);
-  }
-}
-
-function partnerSummaryHTML(p) {
-  const c = p.comparison;
-  return `
-    <div class="tiles" style="margin-bottom:var(--s4)">
-      ${tiles([
-        { label: 'Total records', value: fmtNum(p.feed_total), sub: fmtShort(p.feed_total) },
-        { label: 'Live', value: fmtNum(p.db_future), sub: fmtPct(p.live_pct) + ' still live' },
-        { label: 'Ended', value: fmtNum(p.db_past), sub: 'inserted fine, just past' },
-        { label: 'Not published', value: fmtNum(p.db_unpublished),
-          sub: p.unpublished_pct !== null ? `${fmtPct(p.unpublished_pct, 0)} of total` : 'never went live',
-          cls: p.unpublished_pct >= 40 ? 'is-warn' : '' },
-      ])}
-    </div>
-
-    ${c && c.ok ? `<div class="panel" style="margin-bottom:var(--s4)">
-      <div class="panel-head"><h3>Spreadsheet vs database</h3>
-        <span class="hint">matched on ${esc(c.strategy_label || '—')}</span></div>
-      <div class="panel-body">${comparisonBar(c)}</div>
-    </div>` : `<div class="notice info" style="margin-bottom:var(--s4)"><div class="body">
-      No spreadsheet has been compared for this partner yet. Upload one on the
-      partner page to see matching, missing and extra records.</div></div>`}
-
-    <div class="panel" style="margin-bottom:var(--s4)">
-      <div class="panel-head"><h3>Issues</h3><span class="hint">${p.issue_count} open</span></div>
-      ${p.issues && p.issues.length ? `<div class="panel-body" style="display:grid;gap:var(--s3)">
-        ${p.issues.map((i) => `<div class="notice ${i.severity === 'critical' ? 'bad' : (i.severity === 'warning' ? 'warn' : 'info')}">
-          <div class="body"><strong>${esc(i.title)}</strong><br>${esc(i.detail)}</div>
-        </div>`).join('')}
-      </div>` : emptyState('No issues', 'Counts are current and the ingest job is on schedule.')}
-    </div>
-
-    <dl class="detail-grid" style="padding:0 var(--s1)">
-      <div><dt>Ingest job</dt><dd>${jobBadge(p.job_state)}
-        ${p.job_days_since !== null ? `<span class="muted"> ${p.job_days_since} days since last insert</span>` : ''}</dd></div>
-      <div><dt>Cron entry</dt><dd>${cronBadge(p.cron_status)}</dd></div>
-      <div><dt>Server</dt><dd class="mono">${esc(p.server || '—')}</dd></div>
-      <div><dt>Frequency</dt><dd>${esc(p.frequency || '—')}</dd></div>
-      <div><dt>Last counted</dt><dd>${fmtTime(p.collected_at)}</dd></div>
-      <div><dt>Last record created</dt><dd>${esc(p.last_created || '—')}</dd></div>
-    </dl>`;
+async function renderIssues() {
+  const { issues } = await getJSON('/api/issues?severity=critical');
+  const rows = issues.slice(0, 12);
+  document.getElementById('top-issues').innerHTML = rows.length
+    ? rows.map((i) => `<tr>
+        <td class="sticky-col name">${i.link
+          ? `<a href="${esc(i.link)}">${esc(i.process)}</a>`
+          : esc(i.process)}</td>
+        <td>${esc(i.title)}</td>
+        <td>${severityBadge(i.severity)}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="3">${emptyState('No critical issues', 'Nothing is broken right now.')}</td></tr>`;
 }
 
 async function refresh() {
   const data = await getJSON('/api/overview');
-  CARDS = data.cards;
-  SUMMARY = data.summary;
-  renderTiles(SUMMARY);
-  renderCards();
+  renderTiles(data.summary);
+  renderAttention(data.cards);
+  await renderIssues();
 }
-
-/* wiring */
-document.getElementById('card-search').addEventListener('input', (e) => {
-  filter.query = e.target.value.trim().toLowerCase();
-  renderCards();
-});
-document.getElementById('sort-issues').addEventListener('change', (e) => {
-  filter.problemsFirst = e.target.checked;
-  renderCards();
-});
-document.querySelectorAll('.pill[data-status]').forEach((pill) => {
-  pill.addEventListener('click', () => {
-    const status = pill.dataset.status;
-    if (filter.statuses.has(status)) filter.statuses.delete(status);
-    else filter.statuses.add(status);
-    pill.classList.toggle('active', filter.statuses.has(status));
-    pill.setAttribute('aria-pressed', String(filter.statuses.has(status)));
-    renderCards();
-  });
-});
-document.getElementById('cards').addEventListener('click', (e) => {
-  const card = e.target.closest('[data-partner]');
-  if (card) openPartner(card.dataset.partner);
-});
 
 wireAction('refresh-all', '/api/counts/refresh', refresh, { busy: 'Counting…' });
 startPolling(refresh, 15000);

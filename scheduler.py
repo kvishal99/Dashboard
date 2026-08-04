@@ -22,6 +22,7 @@ path and the timer share a lock, so hitting Refresh during a scheduled run
 waits rather than doubling the load on MySQL.
 """
 import asyncio
+import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -192,10 +193,33 @@ class Scheduler:
             await asyncio.sleep(86400)
             try:
                 await asyncio.to_thread(self.store.prune, self.config.history_keep_days)
+                await asyncio.to_thread(self._prune_exports)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass  # housekeeping must never take the scheduler down
+
+    def _prune_exports(self) -> None:
+        """Delete generated event CSVs past their retention window.
+
+        These are the only large files the dashboard writes - one wcities
+        export is 120 MB - and every one of them is reproducible from the
+        database, so keeping them indefinitely buys nothing but disk. The row
+        goes with the file: a listing that offers a download which 404s is
+        worse than no listing.
+        """
+        cutoff = time.time() - self.config.export_keep_days * 86400
+        for row in self.store.exports(limit=1000):
+            stamp = row.get("finished_at") or row.get("requested_at") or 0
+            if row.get("status") in ("queued", "running") or stamp >= cutoff:
+                continue
+            path = row.get("stored_path")
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            self.store.delete_export(row["id"])
 
     def _last_counts_age(self) -> Optional[float]:
         """Seconds since the newest stored count, or None if we have none."""

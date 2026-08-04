@@ -70,6 +70,18 @@ app:
   # this is a row-by-row read of MySQL, not a COUNT.
   max_compare_rows: 100000
 
+  # ---- Event CSV exports ---------------------------------------------------
+  # Where generated per-partner event CSVs are written. These are the real
+  # event rows, not the count history - see `queries.partner_events`.
+  export_dir: "exports"
+  # Generated files older than this are deleted once a day. They are always
+  # reproducible from the database, so keeping them forever only costs disk.
+  export_keep_days: 7
+  # A hard ceiling per export, or 0 for no limit. This is a truncation point,
+  # not a refusal: unlike the spreadsheet comparison, a partial event export is
+  # still a usable file, and the row count in the UI says how many it holds.
+  max_export_rows: 0
+
   # ---- Logs ----------------------------------------------------------------
   # Written by the app itself so the Logs page has something to read even when
   # the process was not started under systemd. Relative paths sit beside the code.
@@ -150,6 +162,69 @@ queries:
   # for as cap+1 so overflow is detected rather than silently truncating into a
   # comparison that would report every unread row as missing.
   partner_records: "SELECT id, title, dates, enddates, partner_url, published FROM jos_eventlist_events WHERE partner = %s ORDER BY id LIMIT %s"
+
+  # ---- The per-partner event CSV ------------------------------------------
+  # The actual event data behind the "Generate CSV" button, one row per record
+  # we hold for that partner. Read in batches and written straight to disk, so
+  # a partner with 862,000 events costs the same memory as one with 200.
+  #
+  # Three parameters are bound, in this order: partner, the last id already
+  # written, and the batch size. That middle one is KEYSET paging - a
+  # replacement query must keep `AND id > %s ... ORDER BY id LIMIT %s` rather
+  # than using OFFSET, which re-walks every earlier row on every batch and
+  # turns a large partner into a several-minute scan.
+  #
+  # `id` must be selected: it is what each batch resumes from. Every other
+  # column is free - the export writes whichever of them `exports.event_columns`
+  # names, matched by the name in this SELECT list rather than by position.
+  partner_events: "SELECT id, partner_event_id, title, dates, times, enddates, endtimes, locid, price, free_event, booking_url, partner_url, website, published, cancelled, created, modified FROM jos_eventlist_events WHERE partner = %s AND id > %s ORDER BY id LIMIT %s"
+
+  # Venue name/city/state/country for the `locid`s in a batch.
+  #
+  # `venue_details` holds one row per partner submission - wid 92158 has 56,
+  # spelling the country four different ways - so this returns candidates and
+  # the lowest id per wid is chosen in code. Selecting MIN() per column instead
+  # would emit a venue that never existed: one submission's name beside another
+  # submission's city.
+  #
+  # {placeholders} is filled with one %s per id in the batch.
+  venue_details: "SELECT wid, id, name, city, state, country FROM venue_details WHERE wid IN ({placeholders})"
+
+
+####################################################################
+# Which columns the generated event CSV carries, and their headers.
+#
+# Each key must be a column named in `queries.partner_events`, or one
+# of the four filled in from the venue lookup: venue, venue_city,
+# venue_state, venue_country.
+#
+# This is a list rather than code so the file can be lined up with
+# whichever spreadsheet the team reconciles against - reorder, rename
+# a header, or drop a column without touching Python. The default
+# below covers the event fields this database actually holds.
+####################################################################
+exports:
+  event_columns:
+    - [id, "Event ID"]
+    - [partner_event_id, "Partner Event ID"]
+    - [title, "Title"]
+    - [dates, "Start Date"]
+    - [times, "Start Time"]
+    - [enddates, "End Date"]
+    - [endtimes, "End Time"]
+    - [venue, "Venue"]
+    - [venue_city, "City"]
+    - [venue_state, "State"]
+    - [venue_country, "Country"]
+    - [price, "Price"]
+    - [free_event, "Free Event"]
+    - [booking_url, "Booking URL"]
+    - [partner_url, "Partner URL"]
+    - [website, "Website"]
+    - [published, "Published"]
+    - [cancelled, "Cancelled"]
+    - [created, "Created"]
+    - [modified, "Modified"]
 
 
 ####################################################################

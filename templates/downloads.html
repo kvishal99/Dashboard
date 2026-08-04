@@ -42,6 +42,10 @@ async function load() {
   const data = await getJSON('/api/downloads');
 
   document.getElementById('sections').innerHTML = [
+    group('Partner event CSVs',
+          'the actual event rows — generated from a partner’s Generated Files tab',
+          data.events,
+          'None generated yet — open a partner and press Generate CSV'),
     group('Generated exports', 'built from current data on request', data.generated),
     group('Comparison results',
           `${data.comparisons.length} file${data.comparisons.length === 1 ? '' : 's'} from spreadsheet comparisons`,

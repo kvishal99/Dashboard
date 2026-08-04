@@ -3,16 +3,35 @@
 Web dashboard for partner ingestion, spreadsheet reconciliation, website health
 and PM2 processes.
 
-Eight sections in the sidebar:
+## It is partner-centric
+
+**You pick a partner, then see that partner and nothing else.** The work happens
+on **Partners**, which is a two-pane workspace: a compact list on the left (name,
+status, last run — three facts, so it can be scanned), and on the right six tabs
+covering only the selected partner:
+
+| Tab | What it shows for that partner |
+|---|---|
+| **Overview** | The counts, the comparison bar if one has been run, and the details |
+| **Jobs** | Ingest freshness, then its crontab lines **grouped by what they are for** |
+| **Process Logs** | That partner's activity — collections, feed reports, comparisons, exports, cron output |
+| **Generated Files** | Generate and download the partner's real event CSV; uploaded sheets; comparison rows |
+| **Comparison** | Upload a spreadsheet and diff it against the database |
+| **Issues** | Only that partner's open issues |
+
+Everything on the right is fetched per partner, so selecting a different one
+genuinely replaces what is on screen rather than filtering a page that already
+loaded all 120.
+
+Seven sections in the sidebar:
 
 | Section | What it shows |
 |---|---|
-| **Dashboard** | Summary only. Headline tiles, then one compact card per partner: name, status, records, last updated, issue count |
-| **Partners** | The full sortable table, and a detail page per partner |
-| **Processes** | PM2 processes, the crontab inventory, and website health |
-| **Issues** | Everything currently wrong, worst first, across all three |
-| **Logs** | The dashboard's own log — search, filter by level/date/status, download |
-| **Downloads** | Every file the dashboard can hand you: exports, logs, uploaded sheets |
+| **Overview** | Summary only: headline tiles, who needs attention, the worst issues. Hands you to a partner |
+| **Partners** | The workspace above — the main page |
+| **Issues** | Everything currently wrong: process, error, last run, status, retry |
+| **Processes** | PM2 processes, the categorised crontab inventory, and website health |
+| **Downloads** | Every file the dashboard can hand you: event CSVs, exports, logs, uploaded sheets |
 | **Reports** | The management view — health split, worst offenders, printable |
 | **Settings** | What this instance is configured to do, and where to change it |
 
@@ -21,10 +40,21 @@ marked *Soon*. The sidebar, its active states and its spacing already account
 for it, so building that module later is a new template and a `NAV` entry — not
 a redesign.
 
+### There is no global Logs page
+
+There used to be one, showing every line the process wrote, for every partner at
+once — so answering *"what happened to WCities last night?"* meant reading past a
+hundred lines about somebody else. Those lines now appear on the partner's own
+**Process Logs** tab, assembled per partner by [activity.py](activity.py).
+
+Nothing was removed from the back end: `/api/logs`, `/api/logs/files`,
+`/download/log/{name}` and `/download/logs.csv` all still work, and the log
+files are still listed on Downloads.
+
 ## The design rule
 
 **The main dashboard shows a summary and nothing else.** `/api/overview` returns
-eleven fields per partner and no history, no comparison rows and no crontab
+twelve fields per partner and no history, no comparison rows and no crontab
 lines. Opening a partner fetches that partner's detail at that moment, which is
 why 112 partners cost the same to display as 12, and why a 113th costs the front
 page nothing.
@@ -627,12 +657,87 @@ never*:
 The partner status badge is derived from these rather than from a second set of
 rules, so a card can never read *Success* beside a red issue count.
 
+## The partner event CSV
+
+The download that carries the **actual event data** — one row per record we hold
+for that partner, not one row per hourly collection. Generate it from a
+partner's **Generated Files** tab, in one of three scopes: everything we hold,
+live only, or never-published only.
+
+**It runs as a background job**, because these are not small. `wcities` is
+708,221 rows and 120 MB and takes about five minutes; generating that inside the
+request would hold a worker and time the browser out long before the file
+existed. So:
+
+```
+POST /api/partners/{name}/export?scope=all   ->  {"export": {...}, "joined": false}
+GET  /api/partners/{name}/export             ->  status, rows written, size
+GET  /download/export/{id}                   ->  the file, once status is "done"
+```
+
+The page polls while it runs and shows `rows_written` against the expected
+total. Pressing Generate twice **joins the run already in progress** rather than
+starting a second scan of the same partner, which is also what a second person
+opening the page gets.
+
+Three details worth knowing:
+
+- **Paged by keyset, not OFFSET.** `WHERE id > <last>` rather than `LIMIT n
+  OFFSET m`: with OFFSET the server walks and discards every row before the
+  window, so page N costs N pages of work. Measured on a real partner, the
+  OFFSET form spent most of its time re-reading rows it had already written.
+- **Venue names are resolved per batch, never joined.** `venue_details` holds one
+  row per partner submission — `wid` 92158 has 56 of them, spelling the country
+  four different ways — so joining it would multiply every event by the number
+  of times its venue was ever described. Each batch collects its `locid`s and
+  resolves them in one grouped lookup, and the lowest id per `wid` wins so all
+  four venue fields come from the same submission. Choosing that row in SQL with
+  `id IN (SELECT MIN(id) ... GROUP BY wid)` was **15× slower** (26.5s vs 1.7s
+  for one partner) because `wid` is not indexed and the subquery scans twice; it
+  is done in Python instead, for byte-identical output.
+- **A failed export deletes its half-written file.** A partial CSV that downloads
+  cleanly is worse than none, because nothing about it says it is short.
+
+Generated files are deleted after `app.export_keep_days` (7) — they are always
+reproducible from the database, so keeping them only costs disk.
+
+### Matching your spreadsheet
+
+The columns are **configured, not coded**, so the file can be lined up with
+whichever sheet the team reconciles against without touching Python:
+
+```yaml
+exports:
+  event_columns:
+    - [id, "Event ID"]
+    - [title, "Title"]
+    - [venue, "Venue"]
+    # ...
+```
+
+Each key is either a column named in `queries.partner_events` or one of the four
+filled in from the venue lookup (`venue`, `venue_city`, `venue_state`,
+`venue_country`). Columns are matched **by name in the SELECT list**, not by
+position, so reordering the query cannot silently shift every value one column
+to the left.
+
+> The default column set covers the event fields this database holds. The team's
+> per-partner sheets live in Dropbox and are not readable from this machine, so
+> they have not been matched field-for-field — set `event_columns` to the sheet's
+> own headers once you have one to hand.
+
 ## Logs
 
-The dashboard's own log, read in the browser: search, filter by level (a floor,
-not an exact match — *Warning* means warnings and worse), by HTTP status class,
-and by date. Downloadable whole, or as a CSV of exactly what the filters
-produced.
+The dashboard's own log, read per partner on the partner's **Process Logs** tab
+(see [activity.py](activity.py)). The reading and filtering below is still what
+backs it, and still what `/api/logs` and the log downloads serve — search, filter
+by level (a floor, not an exact match — *Warning* means warnings and worse), by
+HTTP status class, and by date.
+
+The partner feed drops HTTP access lines that succeeded, and 401/403 as well:
+the partner's name appears in the dashboard's *own* request URLs
+(`GET /api/partners/venuepilot/logs 200`), so without that filter the feed fills
+up with a record of the page that is displaying it.
 
 Lines are read **backwards from the end of the file**, so a log left running for
 a month opens as fast as a fresh one — cost is set by how much is displayed, not
@@ -699,6 +804,13 @@ except the `x-agent-secret` POSTs, which never do.
 | `GET /api/partners/{name}/comparison` | The stored comparison — counts only |
 | `GET /api/comparisons/{id}/rows` | A page of missing/extra rows (`?side=&q=&offset=`) |
 | `DELETE /api/uploads/{id}` | Remove a sheet and everything derived from it |
+| `GET /api/partners/{name}/jobs` | That partner's crontab lines, grouped by category |
+| `GET /api/partners/{name}/logs` | That partner's process log |
+| `GET /api/partners/{name}/files` | That partner's files: event CSVs, sheets, comparison rows |
+| `POST /api/partners/{name}/export` | Start generating the event CSV (`?scope=all\|live\|unpublished`) |
+| `GET /api/partners/{name}/export` | Newest export for that partner, plus history |
+| `GET /api/exports/{id}` | One export's status, polled while it generates |
+| `DELETE /api/exports/{id}` | Remove a generated file |
 | `GET /api/issues` | Every open issue (`?severity=&scope=&kind=&q=`) |
 | `GET /api/logs` | Filtered, paged log lines |
 | `GET /api/logs/files` | Which logs can be read |
@@ -730,6 +842,7 @@ this natively in the browser, so nothing is lost on the client side.
 | `/download/cron.csv` | The whole crontab inventory |
 | `/download/partner/{name}/history.csv` | One partner's count history |
 | `/download/comparison/{id}/missing.csv` | The rows behind a comparison (also `extra.csv`) |
+| `/download/export/{id}` | A generated partner event CSV |
 | `/download/log/{name}` | A whole log file |
 | `/download/logs.csv` | The log as currently filtered |
 | `/download/upload/{id}` | An uploaded spreadsheet, as it was uploaded |
@@ -750,8 +863,10 @@ counts.py       runs the counts for one partner
 sheets.py       CSV/XLSX reading and column detection, standard library only
 compare.py      spreadsheet vs database diff, and choosing the match key
 issues.py       the one definition of "something is wrong"
+activity.py     one partner's process log, assembled from what we already store
 applog.py       log formatting, tail-first reading, filtering
 exports.py      CSV generation for every download
+event_export.py the partner event CSV - batched read, background job
 health.py       one website check
 alerts.py       down/recovery emails (state machine + SMTP)
 scheduler.py    the background loops
@@ -759,10 +874,11 @@ store.py        SQLite history, uploads and comparisons (ops.db)
 check_db.py     pre-flight connectivity/query check
 agent.py        PM2 + crontab reporter, runs on each target server
 
-templates/      one page per file, plus base.html (the shell) and icons/
+templates/      partners.html is the workspace; base.html is the shell
 static/css/     tokens.css (palette and scale), layout.css, components.css
 static/js/      core.js (helpers, badges, polling, slide-over), table.js
 uploads/        partner spreadsheets, kept so a comparison can be checked
+exports/        generated partner event CSVs, pruned after export_keep_days
 ```
 
 ## Notes on the UI
@@ -996,6 +1112,52 @@ insert, nothing scheduled to refresh it.
 The NO CRON / NOT COLLECTED split matters: `livenation-europe` sits on
 `198.61.136.173`, which can't be reached, so it reports NOT COLLECTED rather
 than claiming a missing cron.
+
+### Not every cron job is a data insertion
+
+They were all presented as though they were. Of the 289 lines collected, only
+about a fifth actually insert events; the rest watch processes, generate CSV
+feeds, unpublish duplicates or push images to a CDN — different work, different
+people, and a different reaction when one breaks.
+
+`cron_parse.categorise()` files each line into one of six:
+
+| Category | What lands there | Count |
+|---|---|---|
+| **Website Health** | watchdogs, process killers, connectivity probes | 7 |
+| **Scrapers** | scrapers, crawlers, feed downloads | 7 |
+| **Import Jobs** | anything that inserts or updates event records | 59 |
+| **CSV & Reports** | feed exports, counts, mailed reports | 27 |
+| **Maintenance** | unpublishing duplicates, expiry, image and index upkeep | 84 |
+| **Other** | genuinely miscellaneous one-offs | 105 |
+
+Two things make this work on real data:
+
+- **It classifies the script path, not the command line.** 75 of these lines end
+  in `> something.csv`, so matching the whole command would file three quarters
+  of the crontab under "CSV".
+- **Order is by specificity, not by display order.** Partner ingest lives under
+  `com_events_venue/`, but so does `com_events_venue/UnpublishDuplicates/`, which
+  is housekeeping — so the maintenance rule is tested before the directory-wide
+  import rule.
+
+The category is stored on each row and re-derived for rows collected before the
+column existed, so an old database does not show everything as "Other". The
+Processes page filters by it, and a partner's **Jobs** tab groups by it.
+
+### Partner names in crontabs are matched, not invented
+
+`guess_partner()` used to return the raw directory when it matched no known
+partner, which invented three: `UnpublishDuplicates` (with 20-odd jobs),
+`alternateCron`, and `daily-event-cron.sh >` — and every one of them then
+appeared as a partner in the cross-reference. Now a candidate must look like a
+directory name (no spaces, no redirect, no script extension) and must not be one
+of the shared-machinery directories in `cron_parse.NOT_A_PARTNER`.
+
+Directories that *are* partners but appear in neither MySQL nor the status sheet
+are still kept — `fandango`, `ticketsnow` and `reservix` all have crons while
+having no rows and no sheet line, which is worth seeing. Net effect on real
+data: the 3 invented partners are gone, all 18 real ones remain.
 
 ### Job names
 

@@ -18,6 +18,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -25,9 +26,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import activity as activity_mod
 import applog
 import compare as compare_mod
 import cron_parse
+import event_export
 import exports
 import issues as issues_mod
 import jobs as jobs_mod
@@ -56,12 +59,23 @@ SCHEDULER_ENABLED = os.environ.get("OPS_DISABLE_SCHEDULER", "") not in ("1", "tr
 # template so every page agrees on what exists and what is current, and so the
 # Knowledge Base can be switched on later by flipping `enabled` - no template,
 # route or stylesheet has to change for it to appear.
+#
+# Partners sits at the top and is where the work happens: you pick a partner and
+# see that partner's jobs, logs, files and issues, and nothing about anyone
+# else. The sections below it are the cross-partner views that genuinely have to
+# span everything - what is wrong right now, whether the machinery is running,
+# and how it was configured.
+#
+# There is deliberately no global Logs section. It showed every line the process
+# wrote for every partner at once, so answering "what happened to WCities?"
+# meant reading past a hundred lines about somebody else. Those lines are now on
+# the partner's own Logs tab, and the log FILES are still downloadable from
+# Downloads - see activity.py.
 NAV: List[Dict[str, Any]] = [
-    {"key": "overview", "label": "Dashboard", "href": "/", "icon": "grid"},
+    {"key": "overview", "label": "Overview", "href": "/", "icon": "grid"},
     {"key": "partners", "label": "Partners", "href": "/partners", "icon": "users"},
-    {"key": "processes", "label": "Processes", "href": "/processes", "icon": "activity"},
     {"key": "issues", "label": "Issues", "href": "/issues", "icon": "alert", "badge": "issues"},
-    {"key": "logs", "label": "Logs", "href": "/logs", "icon": "list"},
+    {"key": "processes", "label": "Processes", "href": "/processes", "icon": "activity"},
     {"key": "downloads", "label": "Downloads", "href": "/downloads", "icon": "download"},
     {"key": "reports", "label": "Reports", "href": "/reports", "icon": "chart"},
     {"key": "settings", "label": "Settings", "href": "/settings", "icon": "cog"},
@@ -76,13 +90,21 @@ NAV: List[Dict[str, Any]] = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Timestamp every log line and mirror it to the file the Logs page reads.
+    # Timestamp every log line and mirror it to the file the partner Logs tabs
+    # read.
     #
     # This has to happen HERE rather than at import time: uvicorn installs its
     # own logging configuration when the server starts, which is after this
     # module is imported and would replace any formatter set earlier. Startup
     # runs after that, so this is the first point at which the format sticks.
     applog.configure(config.log_file, config.log_level)
+
+    # An export that was running when the process stopped has no process behind
+    # it any more. Left alone it would sit at "running" forever, and its partner
+    # could never start another one.
+    orphaned = store.reset_running_exports()
+    if orphaned:
+        print(f"[exports] marked {orphaned} interrupted export(s) as failed")
 
     if SCHEDULER_ENABLED:
         scheduler.start()
@@ -366,6 +388,14 @@ def full_state() -> Dict[str, Any]:
     return {"partners": partners, "sites": sites, "servers": servers, "issues": found}
 
 
+def _partner_row(partner_name: str) -> Dict[str, Any]:
+    """One partner's full row, or 404. The per-partner routes all start here."""
+    for row in full_state()["partners"]:
+        if row["name"] == partner_name:
+            return row
+    raise HTTPException(status_code=404, detail=f"unknown partner: {partner_name}")
+
+
 def build_summary(partners: List[Dict[str, Any]]) -> Dict[str, Any]:
     sites = build_site_rows()
     servers = build_server_rows()
@@ -400,6 +430,11 @@ def build_summary(partners: List[Dict[str, Any]]) -> Dict[str, Any]:
 CARD_FIELDS = (
     "name", "status", "issue_count", "feed_total", "db_future", "live_pct",
     "collected_at", "last_created", "job_state", "server", "frequency",
+    # Days since the partner last had anything inserted, computed here from
+    # MAX(created). The list shows "last run" from this rather than re-parsing
+    # last_created in the browser: it is a MySQL datetime in server-local time,
+    # and Date.parse would have to guess a timezone to turn it into an age.
+    "job_days_since",
 )
 
 
@@ -426,15 +461,20 @@ async def page_overview(request: Request):
 
 @app.get("/partners")
 async def page_partners(request: Request):
-    return page(request, "partners.html", "partners")
+    return page(request, "partners.html", "partners", selected=None)
 
 
 @app.get("/partners/{partner_name}")
 async def page_partner_detail(request: Request, partner_name: str):
+    """The same workspace, with one partner already selected.
+
+    A partner is a URL rather than only a click, because links to a partner are
+    pasted into tickets and chat, and the Issues page links straight to the tab
+    that explains each issue.
+    """
     if partner_name not in store.latest_counts():
         raise HTTPException(status_code=404, detail=f"unknown partner: {partner_name}")
-    partner = {"name": partner_name, **config.meta_for(partner_name)}
-    return page(request, "partner_detail.html", "partners", partner=partner)
+    return page(request, "partners.html", "partners", selected=partner_name)
 
 
 @app.get("/processes")
@@ -447,9 +487,11 @@ async def page_issues(request: Request):
     return page(request, "issues.html", "issues")
 
 
-@app.get("/logs")
-async def page_logs(request: Request):
-    return page(request, "logs.html", "logs")
+# There is no /logs page any more - the global log view was removed because it
+# mixed every partner together. The log API and the log file downloads below are
+# deliberately kept: they still back the partner Logs tabs (activity.py reads
+# through applog) and the Downloads page, and removing working endpoints that
+# nothing asked to lose would be a different change from redesigning the UI.
 
 
 @app.get("/downloads")
@@ -595,6 +637,176 @@ async def api_report_feed_count(
 @app.get("/api/partners/{partner_name}/feed-history")
 async def api_feed_history(partner_name: str, limit: int = Query(60, ge=1, le=500)):
     return {"history": store.feed_history(partner_name, limit)}
+
+
+# ---------------------------------------------------------------------------
+# API - one partner's jobs, logs and files
+#
+# These three are what make the dashboard partner-centric. Each answers its
+# question for ONE partner and returns nothing about any other, so selecting a
+# partner genuinely changes what is on screen rather than filtering a page that
+# has already loaded everything.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/partners/{partner_name}/jobs")
+async def api_partner_jobs_detail(partner_name: str):
+    """This partner's ingest job and its crontab lines, grouped by category.
+
+    The categories matter because a partner's rows are not all the same kind of
+    work: an insert job going quiet is an outage, while a report generator going
+    quiet usually is not.
+    """
+    _require_partner(partner_name)
+
+    rows = store.cron_jobs_for_partner(partner_name)
+    now = time.time()
+    for row in rows:
+        row["log_age_days"] = (
+            round((now - row["log_mtime"]) / 86400.0, 1) if row["log_mtime"] else None
+        )
+        row["disabled"] = bool(row["disabled"])
+        # Rows stored before categories existed carry none. Derived here rather
+        # than defaulted to "other", which filed every pre-existing insert job
+        # under Other - the exact mislabelling this feature exists to remove.
+        if not row.get("category"):
+            row["category"] = cron_parse.categorise(
+                row.get("script"), row.get("command") or "", row.get("name") or ""
+            )
+        row["category_label"] = cron_parse.CATEGORY_LABELS.get(
+            row["category"], "Other"
+        )
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(row["category"], []).append(row)
+
+    # Declared order, not dictionary order, so the sections do not reshuffle
+    # between two partners.
+    categories = [
+        {"key": key, "label": label, "detail": detail, "jobs": groups.get(key, [])}
+        for key, label, detail in cron_parse.CATEGORIES
+        if groups.get(key)
+    ]
+
+    partner_row = _partner_row(partner_name)
+    return {
+        "partner": partner_name,
+        "categories": categories,
+        "summary": {
+            "total": len(rows),
+            "active": sum(1 for r in rows if not r["disabled"]),
+            "disabled": sum(1 for r in rows if r["disabled"]),
+        },
+        # The ingest-freshness verdict, which is derived from MAX(created)
+        # rather than from the crontab.
+        "ingest": {
+            key: partner_row.get(key)
+            for key in ("job_state", "job_days_since", "job_expected_days",
+                        "job_overdue_by", "cron_status", "cron_schedule",
+                        "frequency", "server", "last_created")
+        },
+        "now": now,
+    }
+
+
+@app.get("/api/partners/{partner_name}/logs")
+async def api_partner_logs(partner_name: str, limit: int = Query(120, ge=1, le=500)):
+    """This partner's process log, newest first.
+
+    Assembled from what the dashboard already recorded about this partner -
+    collections, feed reports, uploads, comparisons, exports, cron output and
+    the app log lines that name it. See activity.py for why each source is
+    included and what it can and cannot claim.
+    """
+    _require_partner(partner_name)
+
+    entries = activity_mod.build(
+        partner=partner_name,
+        counts=store.counts_history(partner_name, limit=60),
+        feed_reports=store.feed_history(partner_name, limit=20),
+        uploads=store.uploads(partner_name, limit=20),
+        comparisons=store.comparison_history(partner_name, limit=20),
+        exports=store.exports(partner_name, limit=20),
+        cron_rows=store.cron_jobs_for_partner(partner_name),
+        log_path=config.log_file,
+        limit=limit,
+    )
+    for entry in entries:
+        entry["time"] = _iso(entry["ts"])
+    return {
+        "partner": partner_name,
+        "entries": entries,
+        "summary": activity_mod.summarise(entries),
+        "now": time.time(),
+    }
+
+
+@app.get("/api/partners/{partner_name}/files")
+async def api_partner_files(partner_name: str):
+    """Every file that belongs to THIS partner, and no one else's.
+
+    Three kinds, kept apart because they answer different questions: generated
+    event CSVs (the data), the sheets someone uploaded (the source of a
+    comparison), and the comparison results themselves.
+    """
+    _require_partner(partner_name)
+
+    uploads = store.uploads(partner_name, limit=50)
+    comparison = store.latest_comparison(partner_name)
+    export_rows = store.exports(partner_name, limit=20)
+
+    generated = [{
+        "kind": "export", "id": row["id"], "name": row["filename"]
+        or f"{partner_name}-events.csv",
+        "href": f"/download/export/{row['id']}",
+        "status": row["status"],
+        "rows": row["rows_written"],
+        "size": row["size_bytes"],
+        "scope": row["scope"],
+        "created_at": row["finished_at"] or row["requested_at"],
+        "detail": (
+            f"{row['rows_written']:,} events · "
+            f"{event_export.describe_scope(row['scope'])}"
+            if row["status"] == "done"
+            else f"{row['status']}: {row['error'] or 'in progress'}"
+        ),
+        "available": row["status"] == "done"
+        and bool(row["stored_path"]) and os.path.isfile(row["stored_path"]),
+    } for row in export_rows]
+
+    comparison_files = []
+    if comparison and comparison.get("ok"):
+        for side, label in (("missing", "Missing from database"),
+                            ("extra", "Extra in database")):
+            count = comparison.get(side) or 0
+            if count:
+                comparison_files.append({
+                    "kind": "comparison", "name": f"{label} ({count:,} rows)",
+                    "href": f"/download/comparison/{comparison['id']}/{side}.csv",
+                    "detail": f"from the comparison run {_iso(comparison['computed_at'])}",
+                    "available": True,
+                })
+
+    return {
+        "partner": partner_name,
+        "generated": generated,
+        "comparisons": comparison_files,
+        "uploads": [{
+            "kind": "upload", "id": row["id"], "name": row["filename"],
+            "href": f"/download/upload/{row['id']}",
+            "detail": f"{row['row_count'] or 0:,} rows · uploaded {_iso(row['uploaded_at'])}",
+            "available": bool(row.get("stored_path")
+                              and os.path.isfile(row["stored_path"])),
+        } for row in uploads],
+        # Always available, and cheap - it is generated from SQLite on request.
+        "history": {
+            "name": "Count history (CSV)",
+            "href": f"/download/partner/{quote(partner_name)}/history.csv",
+            "detail": "One row per collection - not the event data",
+        },
+        "now": time.time(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +981,163 @@ async def api_delete_upload(upload_id: int):
             pass
     store.delete_upload(upload_id)
     return {"status": "ok", "deleted": upload_id}
+
+
+# ---------------------------------------------------------------------------
+# API - generated event CSVs
+#
+# The download the team actually wanted: the partner's event rows, not the
+# count history. It is a job rather than a response because the biggest
+# partners are hundreds of thousands of records - `wcities` is 708,221 rows and
+# 120 MB, and takes about five minutes - which no browser will wait for.
+# ---------------------------------------------------------------------------
+
+
+async def _run_export(export_id: int, partner_name: str, scope: str) -> None:
+    """Build one export, updating its row as it goes. Runs as a background task."""
+    stored_name = exports.safe_filename(
+        partner_name, scope, time.strftime("%Y%m%d-%H%M%S")
+    ) + ".csv"
+    path = os.path.join(config.export_dir, stored_name)
+
+    store.update_export(
+        export_id, status="running", started_at=time.time(),
+        filename=stored_name, stored_path=path,
+    )
+
+    # Progress is written straight to SQLite rather than held in memory, so the
+    # status endpoint reports it without this task and the request handler
+    # having to share anything.
+    def progress(rows_done: int) -> None:
+        store.update_export(export_id, rows_written=rows_done)
+
+    try:
+        result = await asyncio.to_thread(
+            event_export.build,
+            partner_name,
+            scope,
+            config.database,
+            path,
+            config.event_columns,
+            config.queries.get("partner_events") or event_export.DEFAULT_EVENT_QUERY,
+            config.queries.get("venue_details") or event_export.DEFAULT_VENUE_QUERY,
+            config.max_export_rows or None,
+            progress,
+        )
+        store.update_export(
+            export_id, status="done", rows_written=result["rows"],
+            size_bytes=result["size"], finished_at=time.time(), error=None,
+        )
+    except Exception as exc:
+        # The half-written file is removed: a partial CSV that downloads
+        # cleanly is worse than none, because nothing about it says it is short.
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        store.update_export(
+            export_id, status="failed", finished_at=time.time(),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+@app.post("/api/partners/{partner_name}/export")
+async def api_start_export(
+    partner_name: str,
+    scope: str = Query("all", pattern="^(all|live|unpublished)$"),
+):
+    """Start generating this partner's event CSV, or join the run in progress."""
+    _require_partner(partner_name)
+
+    if not config.queries.get("partner_events"):
+        raise HTTPException(
+            status_code=501,
+            detail="queries.partner_events is not set in config.yaml, so the "
+                   "event CSV cannot be generated. See the README.",
+        )
+
+    # Pressing the button twice must not start a second scan of the same
+    # partner - it joins the first, which is also what a second person opening
+    # the page should get.
+    running = store.active_export(partner_name)
+    if running:
+        return {"export": running, "joined": True}
+
+    row = _partner_row(partner_name)
+    expected = row.get("feed_total") if scope == "all" else (
+        row.get("db_future") if scope == "live" else row.get("db_unpublished")
+    )
+
+    export_id = store.create_export(partner_name, scope, total_rows=expected)
+    asyncio.create_task(_run_export(export_id, partner_name, scope))
+    return {"export": store.export(export_id), "joined": False}
+
+
+@app.get("/api/partners/{partner_name}/export")
+async def api_partner_export(partner_name: str):
+    """The newest export for this partner, plus its recent history."""
+    _require_partner(partner_name)
+    latest = store.latest_export(partner_name)
+    return {
+        "export": latest,
+        "history": store.exports(partner_name, limit=10),
+        "scopes": [
+            {"key": key, "detail": detail}
+            for key, (_, detail) in event_export.SCOPES.items()
+        ],
+        "configured": bool(config.queries.get("partner_events")),
+        "now": time.time(),
+    }
+
+
+@app.get("/api/exports/{export_id}")
+async def api_export_status(export_id: int):
+    """One export's status. Polled by the page while it generates."""
+    row = store.export(export_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="unknown export")
+    return {"export": row, "now": time.time()}
+
+
+@app.delete("/api/exports/{export_id}")
+async def api_delete_export(export_id: int):
+    row = store.export(export_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="unknown export")
+    if row["status"] == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="this export is still generating - wait for it to finish",
+        )
+    if row.get("stored_path") and os.path.isfile(row["stored_path"]):
+        try:
+            os.remove(row["stored_path"])
+        except OSError:
+            pass
+    store.delete_export(export_id)
+    return {"status": "ok", "deleted": export_id}
+
+
+@app.get("/download/export/{export_id}")
+async def download_export(export_id: int):
+    row = store.export(export_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="unknown export")
+    if row["status"] != "done":
+        raise HTTPException(
+            status_code=409,
+            detail=f"this export is {row['status']}"
+                   + (f": {row['error']}" if row.get("error") else
+                      " - it is not ready to download yet"),
+        )
+    path = row.get("stored_path")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(
+            status_code=410,
+            detail="the generated file is no longer on disk - generate it again",
+        )
+    return FileResponse(path, media_type="text/csv", filename=row["filename"])
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1418,14 @@ async def api_cron():
         r["log_age_days"] = (
             round((now - r["log_mtime"]) / 86400.0, 1) if r["log_mtime"] else None
         )
+        # Rows collected before categories existed have none stored. Deriving it
+        # here rather than back-filling the table keeps the answer current with
+        # the rules in cron_parse, and costs nothing at this scale.
+        if not r.get("category"):
+            r["category"] = cron_parse.categorise(
+                r.get("script"), r.get("command") or "", r.get("name") or ""
+            )
+        r["category_label"] = cron_parse.CATEGORY_LABELS.get(r["category"], "Other")
     servers = store.cron_servers()
     if config.cron_source == "agent":
         # Nothing is scheduled on this side - the servers push. Report when the
@@ -1070,17 +1447,29 @@ async def api_cron():
         }
     else:
         job = scheduler.status().get("crons")
+    by_category = {key: 0 for key, _, _ in cron_parse.CATEGORIES}
+    for r in rows:
+        by_category[r["category"]] = by_category.get(r["category"], 0) + 1
+
     return {
         "jobs": rows,
         "servers": servers,
         "job": job,
         "source": config.cron_source,
+        # Declared order, and every category present even at zero, so the
+        # filter list does not reshuffle as jobs come and go.
+        "categories": [
+            {"key": key, "label": label, "detail": detail,
+             "count": by_category.get(key, 0)}
+            for key, label, detail in cron_parse.CATEGORIES
+        ],
         "summary": {
             "total": len(rows),
             "servers": len(servers),
             "disabled": sum(1 for r in rows if r["disabled"]),
             "with_partner": sum(1 for r in rows if r["partner"]),
             "with_log": sum(1 for r in rows if r["log_mtime"]),
+            "by_category": by_category,
         },
         "now": now,
     }
@@ -1208,8 +1597,22 @@ async def api_downloads():
                     "partner": partner, "count": count,
                 })
 
+    # The generated per-partner event CSVs. Listed only when the file is still
+    # on disk, so nothing here offers a download that would 404.
+    event_files = [{
+        "kind": "export", "name": f"{row['partner']} - events ({row['scope']})",
+        "href": f"/download/export/{row['id']}",
+        "detail": f"{row['rows_written']:,} events · "
+                  f"{(row['size_bytes'] or 0) / 1024 / 1024:.1f} MB · "
+                  f"generated {_iso(row['finished_at'])}",
+        "partner": row["partner"],
+    } for row in store.exports(limit=100)
+        if row["status"] == "done" and row.get("stored_path")
+        and os.path.isfile(row["stored_path"])]
+
     return {
         "generated": generated,
+        "events": event_files,
         "logs": [{
             "kind": "log", "name": entry["name"],
             "href": f"/download/log/{entry['name']}",
@@ -1242,6 +1645,7 @@ async def download_issues():
     found = full_state()["issues"]
     for issue in found:
         issue["since_iso"] = _iso(issue.get("since"))
+        issue["last_run_iso"] = _iso(issue.get("last_run"))
     return csv_response(found, exports.ISSUE_COLUMNS, "issues.csv")
 
 
@@ -1259,6 +1663,11 @@ async def download_cron():
             round((now - row["log_mtime"]) / 86400.0, 1) if row["log_mtime"] else None
         )
         row["disabled"] = bool(row["disabled"])
+        if not row.get("category"):
+            row["category"] = cron_parse.categorise(
+                row.get("script"), row.get("command") or "", row.get("name") or ""
+            )
+        row["category_label"] = cron_parse.CATEGORY_LABELS.get(row["category"], "Other")
     return csv_response(rows, exports.CRON_COLUMNS, "cron-inventory.csv")
 
 

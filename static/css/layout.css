@@ -257,6 +257,52 @@
   gap: var(--s4);
 }
 
+/* ------------------------------------------------- partner workspace */
+
+/* Pick a partner on the left, see only that partner on the right.
+ *
+ * Two independently scrolling columns rather than one long page: the list has
+ * to stay reachable while you read the detail, otherwise selecting the next
+ * partner means scrolling back past everything you just opened.
+ *
+ * Both columns are `min-height: 0` because a grid child defaults to
+ * `min-height: auto`, which refuses to shrink below its content - the panes
+ * would grow the page instead of scrolling inside it, and the sticky headers
+ * would have nothing to stick to.
+ */
+.workspace {
+  display: grid;
+  grid-template-columns: var(--partner-list-w, 300px) minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: start;
+  height: calc(100vh - var(--topbar-h) - var(--s6) * 2);
+  min-height: 480px;
+}
+
+.workspace > .partner-pane,
+.workspace > .detail-pane {
+  min-height: 0;
+  height: 100%;
+}
+
+.detail-pane {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--s1);
+}
+
+/* Below this the two panes stop being side by side and the list collapses to
+ * its own scrolling block above the detail, which is the only arrangement that
+ * works when there is no room for both. */
+@media (max-width: 900px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+  .workspace > .partner-pane { max-height: 46vh; }
+  .detail-pane { overflow: visible; }
+}
+
 /* --------------------------------------------------------- responsive */
 
 /* The sidebar becomes an overlay. It keeps its own scroll and traps nothing -
