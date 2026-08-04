@@ -16,6 +16,7 @@ import base64
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -229,6 +230,8 @@ def fetch_output(host: str, path: str, max_bytes: int = 25 * 1024 * 1024,
     The file is base64'd in transit: these outputs are CSVs and logs that may
     contain anything, and a raw stream would be mangled by the shell.
     """
+    if not can_reach(host):
+        return False, NO_ROUTE.format(host=host)
     env = env_from_dotenv()
     user, password, key = creds(env, host)
     if "'" in path:
@@ -260,9 +263,35 @@ def fetch_output(host: str, path: str, max_bytes: int = 25 * 1024 * 1024,
         return False, f"could not decode the file: {exc}"
 
 
+def can_reach(host: str, port: int = 22, timeout: float = 4.0) -> bool:
+    """Is this host's SSH port open from here? One quick TCP connect.
+
+    Checked before every remote read, because "no route" is the normal case in
+    production and must not be discovered by waiting. The dashboard runs on
+    100.52.8.134, where port 22 to 44.198.210.209 and 34.197.195.248 is
+    firewalled - a download for a job on either used to sit there until the
+    gateway gave up and returned 502. Four seconds and an honest message beats
+    two minutes and a broken page.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+NO_ROUTE = (
+    "the dashboard cannot open an SSH connection to {host} - port 22 is "
+    "firewalled from where it runs. This server pushes its crontab out rather "
+    "than being logged into, so its files have to come the same way."
+)
+
+
 def remote_size(host: str, path: str) -> Tuple[bool, Any]:
     """Current size of a remote file, re-stat-ed rather than trusted from the
     last collection - these files grow between crontab sweeps."""
+    if not can_reach(host):
+        return False, NO_ROUTE.format(host=host)
     env = env_from_dotenv()
     user, password, key = creds(env, host)
     if "'" in path:
@@ -296,6 +325,8 @@ def stream_to_disk(host: str, path: str, dest: str,
     incrementally and written straight out, so a 400 MB file costs the same
     memory as a 4 KB one.
     """
+    if not can_reach(host):
+        return False, NO_ROUTE.format(host=host)
     env = env_from_dotenv()
     user, password, key = creds(env, host)
     if "'" in path:

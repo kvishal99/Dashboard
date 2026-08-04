@@ -223,6 +223,11 @@ CREATE TABLE IF NOT EXISTS cron_fetches (
     server        TEXT NOT NULL,
     remote_path   TEXT NOT NULL,
     status        TEXT NOT NULL,         -- queued | running | done | failed
+    -- How the bytes get here: "ssh" when the dashboard can log into that
+    -- server, "agent" when it cannot and the agent has to push them out. In
+    -- production the dashboard runs where port 22 to two of the three servers
+    -- is firewalled, so "agent" is the normal case, not the fallback.
+    via           TEXT NOT NULL DEFAULT 'ssh',
     bytes_fetched INTEGER NOT NULL DEFAULT 0,
     total_bytes   INTEGER,               -- re-stat-ed when the fetch starts
     filename      TEXT,
@@ -277,6 +282,11 @@ class Store:
             # Cron rows collected before jobs were categorised. Left NULL rather
             # than back-filled with a guess: the next push from each server
             # re-parses every line and fills it in properly.
+            fetch_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_fetches)")}
+            if fetch_cols and "via" not in fetch_cols:
+                conn.execute(
+                    "ALTER TABLE cron_fetches ADD COLUMN via TEXT NOT NULL DEFAULT 'ssh'")
+
             cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)")}
             if cron_cols and "category" not in cron_cols:
                 conn.execute("ALTER TABLE cron_jobs ADD COLUMN category TEXT")
@@ -760,19 +770,35 @@ class Store:
     # ------------------------------------------------- cron output fetches
 
     def create_fetch(self, job_id: int, server: str, remote_path: str,
-                     total_bytes: Optional[int] = None) -> int:
+                     total_bytes: Optional[int] = None, via: str = "ssh") -> int:
         with self._conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO cron_fetches
-                   (job_id, server, remote_path, status, total_bytes, requested_at)
-                   VALUES (?,?,?,'queued',?,?)""",
-                (job_id, server, remote_path, total_bytes, time.time()),
+                   (job_id, server, remote_path, status, via, total_bytes, requested_at)
+                   VALUES (?,?,?,'queued',?,?,?)""",
+                (job_id, server, remote_path, via, total_bytes, time.time()),
             )
         return cursor.lastrowid
 
+    def pending_agent_fetches(self, server: str) -> List[Dict[str, Any]]:
+        """Files this server's agent has been asked to upload.
+
+        Keyed on the server string the agent reports as its own (SERVER_IP),
+        which is the same key the crontab rows use.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM cron_fetches
+                   WHERE via = 'agent' AND server = ?
+                     AND status IN ('queued','running')
+                   ORDER BY id""",
+                (server,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def update_fetch(self, fetch_id: int, **fields: Any) -> None:
         allowed = {"status", "bytes_fetched", "total_bytes", "filename",
-                   "stored_path", "error", "started_at", "finished_at"}
+                   "stored_path", "error", "started_at", "finished_at", "via"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return

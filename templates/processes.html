@@ -318,6 +318,22 @@ function renderFetch(id, f) {
   if (!target) return;
   if (!f) { target.innerHTML = ''; return; }
 
+  if (f.waiting_for_agent) {
+    // The dashboard has no route into this server, so the file has to be
+    // pushed out by the agent running on it. That happens on the agent's
+    // normal tick, so it is seconds, not instant.
+    target.innerHTML = `<div class="panel" style="margin-bottom:var(--s3)">
+      <div class="panel-body">
+        <div style="font-weight:600;margin-bottom:var(--s2)">Waiting for ${esc(f.server)} to send it…</div>
+        <div class="progress indeterminate"><div class="bar"></div></div>
+        <div class="sub" style="margin-top:var(--s2)">
+          This server cannot be reached directly, so its agent uploads the file
+          on its next check-in.
+        </div>
+      </div></div>`;
+    return;
+  }
+
   if (f.status === 'queued' || f.status === 'running') {
     const pct = f.total_bytes ? Math.min(100, (100 * f.bytes_fetched) / f.total_bytes) : null;
     target.innerHTML = `<div class="panel" style="margin-bottom:var(--s3)">

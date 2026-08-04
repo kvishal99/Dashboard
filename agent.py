@@ -17,12 +17,17 @@ and no SSH password has to be stored anywhere.
 Everything is configured by environment variable so the same file can be copied
 to any server unchanged. Standard library only - no pip install on the target.
 """
+import base64
+import gzip
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -31,6 +36,13 @@ def _cron_url(pm2_url):
     if pm2_url.endswith("/api/pm2/report"):
         return pm2_url[: -len("/api/pm2/report")] + "/api/cron/report"
     return pm2_url.rstrip("/") + "/api/cron/report"
+
+
+def _base_url(pm2_url):
+    """The dashboard root the other endpoints hang off."""
+    if pm2_url.endswith("/api/pm2/report"):
+        return pm2_url[: -len("/api/pm2/report")]
+    return pm2_url.rstrip("/")
 
 
 _DASHBOARD_URL = os.environ.get(
@@ -52,6 +64,12 @@ CONFIG = {
     "interval_seconds": int(os.environ.get("INTERVAL_SECONDS", "5")),
     "cron_interval_seconds": int(os.environ.get("CRON_INTERVAL_SECONDS", "21600")),
     "pm2_bin": os.environ.get("PM2_BIN", "pm2"),
+    # Where to ask for files the dashboard wants but cannot come and get.
+    "files_url": os.environ.get("FILES_URL") or (_base_url(_DASHBOARD_URL) + "/api/agent/files"),
+    # How much of a file to send per request, before compression. 4 MB keeps
+    # each POST small enough to retry cheaply while still moving a 400 MB log
+    # in a manageable number of round trips.
+    "chunk_bytes": int(os.environ.get("CHUNK_BYTES", str(4 * 1024 * 1024))),
 }
 
 
@@ -167,6 +185,80 @@ def post(url, payload, label):
     return False
 
 
+def get_json(url):
+    """GET one JSON body. Returns the parsed object, or None."""
+    req = urllib.request.Request(
+        url, headers={"x-agent-secret": CONFIG["secret"]})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def upload_file(request_id, path):
+    """Send one file to the dashboard, in compressed chunks.
+
+    This is the other half of "the servers push, the dashboard never logs in":
+    the dashboard has no route into most of these boxes, so a file it wants has
+    to leave from here.
+
+    Read and sent a chunk at a time so a 400 MB log costs this agent a few MB
+    of memory, and gzipped because these are run logs and SQL dumps that
+    compress to a small fraction of their size.
+    """
+    seq = 0
+    sent = 0
+    try:
+        total = os.path.getsize(path)
+    except OSError as exc:
+        post("%s/%d" % (CONFIG["files_url"], request_id),
+             {"seq": 0, "error": str(exc)}, "reported unreadable file")
+        return False
+
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                block = fh.read(CONFIG["chunk_bytes"])
+                if not block:
+                    break
+                buf = io.BytesIO()
+                # mtime=0 so the same file produces the same bytes every time.
+                with gzip.GzipFile(fileobj=buf, mode="wb",
+                                   compresslevel=1, mtime=0) as gz:
+                    gz.write(block)
+                payload = {
+                    "seq": seq,
+                    "data": base64.b64encode(buf.getvalue()).decode("ascii"),
+                    "done": False,
+                    "total_bytes": total,
+                }
+                if not post("%s/%d" % (CONFIG["files_url"], request_id),
+                            payload, "sent chunk %d" % seq):
+                    return False
+                sent += len(block)
+                seq += 1
+        # An empty final chunk closes it, so a zero-byte file still completes.
+        return post("%s/%d" % (CONFIG["files_url"], request_id),
+                    {"seq": seq, "data": "", "done": True, "total_bytes": total},
+                    "uploaded %s (%d bytes)" % (os.path.basename(path), sent))
+    except Exception as exc:
+        post("%s/%d" % (CONFIG["files_url"], request_id),
+             {"seq": seq, "error": str(exc)}, "reported failed upload")
+        return False
+
+
+def serve_file_requests():
+    """Upload anything the dashboard has asked this server for."""
+    server = CONFIG["server_ip"] or CONFIG["server_id"]
+    result = get_json("%s?server=%s" % (
+        CONFIG["files_url"], urllib.parse.quote(server, safe="")))
+    if not result:
+        return
+    for request in result.get("requests", []):
+        upload_file(request["id"], request["path"])
+
+
 def send_report():
     processes = get_pm2_processes()
     post(CONFIG["dashboard_url"],
@@ -208,5 +300,8 @@ if __name__ == "__main__":
         if time.time() - last_cron >= CONFIG["cron_interval_seconds"]:
             if send_cron_report():
                 last_cron = time.time()
+        # Files the dashboard has asked for. Checked on the normal tick, so a
+        # request is picked up within a few seconds of being made.
+        serve_file_requests()
         sys.stdout.flush()
         time.sleep(CONFIG["interval_seconds"])

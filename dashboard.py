@@ -14,8 +14,10 @@ That is why the overview stays fast with 112 partners, and why adding a 113th
 costs the front page nothing.
 """
 import asyncio
+import base64
 import os
 import time
+import zlib
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote
@@ -1701,29 +1703,161 @@ def _drop_old_fetches(job_id: int, keep: int) -> None:
         store.delete_fetch(row["id"])
 
 
+# --- the agent side: servers push files out, because they cannot be logged into
+
+class FileChunk(BaseModel):
+    """One slice of a file being uploaded by an agent.
+
+    Sent gzipped and base64'd: the agent is standard-library only and this
+    keeps it to json + urllib, with no multipart handling on either side.
+    """
+    seq: int
+    data: str = ""
+    done: bool = False
+    total_bytes: Optional[int] = None
+    error: Optional[str] = None
+
+
+@app.get("/api/agent/files")
+async def api_agent_pending(server: str, x_agent_secret: str = Header(None)):
+    """What this server's agent has been asked to upload.
+
+    Polled by agent.py on its normal tick. This is how a file gets off a server
+    the dashboard has no route into - the same reason the crontabs are pushed
+    rather than collected.
+    """
+    if x_agent_secret != config.agent_secret:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return {
+        "requests": [
+            {"id": row["id"], "path": row["remote_path"]}
+            for row in store.pending_agent_fetches(server)
+        ]
+    }
+
+
+@app.post("/api/agent/files/{fetch_id}")
+async def api_agent_chunk(
+    fetch_id: int, chunk: FileChunk, x_agent_secret: str = Header(None)
+):
+    """Receive one chunk of a file an agent is uploading."""
+    if x_agent_secret != config.agent_secret:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    row = store.fetch_row(fetch_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="unknown transfer")
+
+    if chunk.error:
+        store.update_fetch(fetch_id, status="failed", finished_at=time.time(),
+                           error=f"the agent could not read it: {chunk.error}")
+        return {"status": "ok"}
+
+    path = row.get("stored_path")
+    if chunk.seq == 0:
+        base = os.path.basename(row["remote_path"]) or "output"
+        stored_name = exports.safe_filename(
+            row["server"], base, time.strftime("%Y%m%d-%H%M%S")
+        )
+        path = os.path.join(config.fetch_dir, stored_name)
+        os.makedirs(config.fetch_dir, exist_ok=True)
+        # Truncate: seq 0 restarts the file, so a retried upload cannot append
+        # to a half-written copy from the attempt before it.
+        open(path, "wb").close()
+        store.update_fetch(
+            fetch_id, status="running", started_at=time.time(),
+            filename=stored_name, stored_path=path, bytes_fetched=0,
+            total_bytes=chunk.total_bytes,
+        )
+
+    if not path:
+        raise HTTPException(status_code=409, detail="that transfer never started")
+
+    written = row["bytes_fetched"] if chunk.seq else 0
+    if chunk.data:
+        try:
+            blob = zlib.decompress(base64.b64decode(chunk.data), 16 + zlib.MAX_WBITS)
+        except Exception as exc:
+            store.update_fetch(fetch_id, status="failed", finished_at=time.time(),
+                               error=f"chunk {chunk.seq} did not decode: {exc}")
+            raise HTTPException(status_code=400, detail="chunk did not decode")
+        with open(path, "ab") as fh:
+            fh.write(blob)
+        written += len(blob)
+
+    if written > config.max_fetch_bytes:
+        store.update_fetch(fetch_id, status="failed", finished_at=time.time(),
+                           error="larger than the configured transfer limit")
+        raise HTTPException(status_code=413, detail="over the transfer limit")
+
+    store.update_fetch(fetch_id, bytes_fetched=written)
+    if chunk.done:
+        store.update_fetch(fetch_id, status="done", finished_at=time.time(),
+                           bytes_fetched=written, error=None)
+        _drop_old_fetches(row["job_id"], keep=fetch_id)
+    return {"status": "ok", "received": written}
+
+
 @app.post("/api/cron/{job_id}/fetch")
 async def api_start_fetch(job_id: int):
-    """Start pulling this job's whole output file, however large it is."""
+    """Start pulling this job's whole output file, however large it is.
+
+    Two routes, chosen by whether this machine can actually open an SSH
+    connection to that server. In production it usually cannot: the dashboard
+    runs where port 22 to 44.198.210.209 and 34.197.195.248 is firewalled,
+    which is why those servers push their crontabs rather than being read. The
+    file comes the same way - queued here, uploaded by the agent on its next
+    tick.
+    """
     job = _cron_output_job(job_id)
 
     running = store.active_fetch(job_id)
     if running:
         return {"fetch": running, "joined": True}
 
+    reachable = await asyncio.to_thread(cron_collect.can_reach, job["server"])
+    via = "ssh" if reachable else "agent"
+
     fetch_id = store.create_fetch(
-        job_id, job["server"], job["log_file"], total_bytes=job.get("log_size")
+        job_id, job["server"], job["log_file"],
+        total_bytes=job.get("log_size"), via=via,
     )
-    asyncio.create_task(_run_fetch(fetch_id, job))
-    return {"fetch": store.fetch_row(fetch_id), "joined": False}
+    if reachable:
+        asyncio.create_task(_run_fetch(fetch_id, job))
+    return {"fetch": store.fetch_row(fetch_id), "joined": False, "via": via}
+
+
+# How long an agent request may sit untouched before it is called a failure.
+# The agent polls on its 5s tick, so anything past a couple of minutes means it
+# is not going to be picked up at all - almost always an agent that predates
+# this feature and needs redeploying.
+AGENT_PICKUP_TIMEOUT = 150.0
 
 
 @app.get("/api/cron/{job_id}/fetch")
 async def api_fetch_status(job_id: int):
     """The newest transfer for this job, polled while it runs."""
     row = store.latest_fetch(job_id)
-    if row and row["status"] == "done":
+    if not row:
+        return {"fetch": None, "now": time.time()}
+
+    # Expire a request no agent ever claimed. Done here rather than in a
+    # background loop because this endpoint is polled anyway, and a request
+    # nobody is watching does no harm until someone looks.
+    if (row["via"] == "agent" and row["status"] == "queued"
+            and time.time() - row["requested_at"] > AGENT_PICKUP_TIMEOUT):
+        store.update_fetch(
+            row["id"], status="failed", finished_at=time.time(),
+            error=(f"the agent on {row['server']} did not pick this up. It is "
+                   "probably running a build that predates file requests - "
+                   f"redeploy it with ./deploy-agent.sh {row['server']}"),
+        )
+        row = store.fetch_row(row["id"])
+
+    if row["status"] == "done":
         row["available"] = bool(row.get("stored_path")
                                 and os.path.isfile(row["stored_path"]))
+    row["waiting_for_agent"] = row["via"] == "agent" and row["status"] == "queued"
     return {"fetch": row, "now": time.time()}
 
 
