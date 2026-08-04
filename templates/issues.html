@@ -4,83 +4,86 @@
 
 {% block content %}
 {#
-  Everything currently wrong, worst first.
+  What is wrong, and what to do about it.
 
-  The old version of this page put Severity, Subject, Issue, Area and Count side
-  by side, which mixed two different questions - "what broke" and "how big is
-  it" - and answered neither well. It now shows one thing per column, and only
-  the things you act on: which process, what it said, when it last ran, what
-  state it is in, and the button that runs it again.
+  Two earlier versions of this page were hard to read for the same reason: they
+  described problems in the system's own words ("Ingest job stalled", severity
+  CRITICAL, kind job_stalled, scope partner, value 118) and left the reader to
+  work out what any of it meant for them. Every column here answers a question
+  someone actually asks - who, what happened, what do I do, when did it last
+  run - and the wording is plain rather than internal.
+
+  Two groups, not three severities: things that are broken now, and things to
+  keep an eye on. A third bucket only ever started arguments about which one
+  something belonged in.
 #}
 <div class="tiles" id="tiles"></div>
-<div id="table"></div>
+<div id="broken"></div>
+<div id="watch" style="margin-top:var(--s5)"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-const table = new DataTable('#table', {
-  title: 'Open issues',
-  hint: 'worst first',
-  searchKeys: ['process', 'title', 'detail', 'subject'],
-  searchPlaceholder: 'Search issues…',
-  exportHref: '/download/issues.csv',
-  pageSize: 50,
-  maxHeight: '64vh',
-  emptyTitle: 'Nothing is wrong',
-  emptyDetail: 'Every partner is counted and on schedule, every site is up, and no process has errored.',
-  chips: [
-    { key: 'critical', label: 'Critical', test: (r) => r.severity === 'critical' },
-    { key: 'warning', label: 'Warning', test: (r) => r.severity === 'warning' },
-    { key: 'info', label: 'Info', test: (r) => r.severity === 'info' },
-  ],
-  filters: [
-    { key: 'scope', label: 'Area', options: [
-      { value: 'partner', label: 'Partners' },
-      { value: 'site', label: 'Websites' },
-      { value: 'process', label: 'Processes' },
-      { value: 'system', label: 'System' },
-    ] },
-  ],
-  columns: [
-    { key: 'process', label: 'Process', sticky: true, sortDefault: 'asc',
-      render: (r) => (r.link
-        ? `<a href="${esc(r.link)}" style="font-weight:600">${esc(r.process)}</a>`
-        : `<span style="font-weight:600">${esc(r.process)}</span>`) },
-    { key: 'title', label: 'Error', sortDefault: 'asc',
-      render: (r) => `<span style="font-weight:600">${esc(r.title)}</span>
-        <div class="sub" style="max-width:64ch;white-space:normal">${esc(r.detail)}</div>` },
-    { key: 'last_run', label: 'Last run',
-      render: (r) => (r.last_run
-        ? `<span class="nowrap muted" title="${esc(fmtTime(r.last_run))}">${timeAgo(r.last_run)}</span>`
-        : '<span class="muted">never</span>') },
-    { key: 'severity', label: 'Status', sortValue: (r) => r.rank, sortDefault: 'asc',
-      render: (r) => severityBadge(r.severity) },
-    // Only rendered where re-running is a meaningful response. A retry button
-    // that cannot help is worse than no button, so a PM2 process that this
-    // dashboard has no way to restart simply shows a dash.
-    { key: 'retry', label: 'Retry', sortable: false,
-      render: (r) => (r.retry
-        ? `<button class="small" data-retry="${esc(r.retry)}" data-label="${esc(r.process)}">Run again</button>`
-        : '<span class="muted">—</span>') },
-  ],
-});
+/* One table definition, used for both groups - they differ only in wording. */
+function issueTable(target, title, hint, emptyTitle, emptyDetail) {
+  return new DataTable(target, {
+    title, hint,
+    searchKeys: ['process', 'title', 'detail', 'subject', 'action'],
+    searchPlaceholder: 'Search…',
+    pageSize: 25,
+    maxHeight: '46vh',
+    emptyTitle, emptyDetail,
+    columns: [
+      { key: 'subject', label: 'Who', sticky: true, sortDefault: 'asc',
+        render: (r) => (r.link
+          ? `<a href="${esc(r.link)}" style="font-weight:600">${esc(r.subject)}</a>`
+          : `<span style="font-weight:600">${esc(r.subject)}</span>`)
+          + `<div class="sub">${esc(r.scope)}</div>` },
+      { key: 'title', label: 'What happened', sortDefault: 'asc',
+        render: (r) => `<span style="font-weight:600">${esc(r.title)}</span>
+          <div class="sub" style="max-width:56ch;white-space:normal">${esc(r.detail)}</div>` },
+      { key: 'action', label: 'What to do', sortable: false,
+        render: (r) => `<span style="max-width:40ch;display:inline-block;white-space:normal">${esc(r.action || '—')}</span>` },
+      { key: 'last_run', label: 'Last run',
+        render: (r) => (r.last_run
+          ? `<span class="nowrap muted" title="${esc(fmtTime(r.last_run))}">${timeAgo(r.last_run)}</span>`
+          : '<span class="muted">never</span>') },
+      // Only where re-running can actually help. A button that cannot fix the
+      // thing it sits beside is worse than no button.
+      { key: 'retry', label: '', sortable: false,
+        render: (r) => (r.retry
+          ? `<button class="small" data-retry="${esc(r.retry)}" data-label="${esc(r.subject)}">Run again</button>`
+          : '') },
+    ],
+  });
+}
 
-function renderTiles(s) {
+const brokenTable = issueTable('#broken',
+  'Broken now', 'these have stopped working',
+  'Nothing is broken', 'Every partner is importing, every site is up.');
+
+const watchTable = issueTable('#watch',
+  'Worth watching', 'degraded or overdue, but still working',
+  'Nothing to watch', 'No partner is overdue or partially published.');
+
+function renderTiles(s, rows) {
+  const partners = new Set(rows.filter((r) => r.scope === 'partner').map((r) => r.subject));
   document.getElementById('tiles').innerHTML = tiles([
-    { label: 'Open issues', value: fmtNum(s.total),
-      sub: s.total ? 'across everything monitored' : 'nothing to act on',
-      cls: s.total ? '' : 'is-ok' },
-    { label: 'Critical', value: fmtNum(s.critical), sub: 'broken now',
+    { label: 'Broken now', value: fmtNum(s.critical),
+      sub: s.critical ? 'need attention today' : 'nothing broken',
       cls: s.critical ? 'is-bad' : 'is-ok' },
-    { label: 'Warning', value: fmtNum(s.warning), sub: 'degraded or overdue',
-      cls: s.warning ? 'is-warn' : '' },
-    { label: 'Partners affected', value: fmtNum(s.partners_affected),
-      sub: 'with at least one issue' },
+    { label: 'Worth watching', value: fmtNum(s.warning),
+      sub: 'overdue or degraded',
+      cls: s.warning ? 'is-warn' : 'is-ok' },
+    { label: 'Partners affected', value: fmtNum(partners.size),
+      sub: `of everything monitored` },
+    { label: 'Everything else', value: fmtNum(s.info),
+      sub: 'worth knowing, not a fault', cls: 'is-info' },
   ]);
 }
 
-/* Delegated, because the table replaces its rows on every poll. */
-document.getElementById('table').addEventListener('click', async (e) => {
+/* Delegated: both tables replace their rows on every poll. */
+document.body.addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-retry]');
   if (!btn) return;
   const original = btn.textContent;
@@ -99,8 +102,9 @@ document.getElementById('table').addEventListener('click', async (e) => {
 
 async function refresh() {
   const data = await getJSON('/api/issues');
-  renderTiles(data.summary);
-  table.setRows(data.issues);
+  renderTiles(data.summary, data.issues);
+  brokenTable.setRows(data.issues.filter((i) => i.severity === 'critical'));
+  watchTable.setRows(data.issues.filter((i) => i.severity !== 'critical'));
 }
 
 startPolling(refresh, 20000);

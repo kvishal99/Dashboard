@@ -113,6 +113,26 @@ NOT_A_PARTNER = {
 _PLAUSIBLE_PARTNER = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{1,39}$")
 
 
+def _partner_in_text(text: str, known: Optional[set]) -> Optional[str]:
+    """The known partner named inside a filename, or None.
+
+    Only ever matches against the known list - a wrapper script called
+    `viagogo_weekly_event_cron.sh` names viagogo, but nothing here should
+    invent a partner out of `weekly` or `cron`.
+
+    Longest name first, so `eventim-uk` wins over `eventim` in
+    `daily_event_cron_eventim_ticketcity_eventim-uk.sh`, and a 4-character
+    floor keeps short names from matching inside unrelated words.
+    """
+    if not known:
+        return None
+    lowered = text.lower()
+    for name in sorted(known, key=len, reverse=True):
+        if len(name) >= 4 and name.lower() in lowered:
+            return name
+    return None
+
+
 def guess_partner(command: str, known: Optional[set] = None) -> Optional[str]:
     """Pull a partner name out of the path.
 
@@ -127,12 +147,22 @@ def guess_partner(command: str, known: Optional[set] = None) -> Optional[str]:
             continue
         rest = command[idx + len(marker):]
         candidate = rest.split("/")[0].strip()
-        # Shape first. The old check only rejected a candidate ENDING in .php or
-        # .sh, so "daily-event-cron.sh >" - the tail of a line whose marker
+
+        # Not a sub-directory but a script sitting in the partner root -
+        # `com_events_venue/viagogo_weekly_event_cron.sh`. These are wrapper
+        # scripts that run one partner's job, and they name the partner in the
+        # filename, so the name is taken from there rather than given up on.
+        # Confirmed against the real crontabs: 16 lines are shaped this way.
+        if candidate.lower().endswith((".php", ".sh", ".py", ".pl")) or " " in candidate:
+            found = _partner_in_text(candidate, known)
+            if found:
+                return found
+            continue
+
+        # Shape check. The old version only rejected a candidate ENDING in .php
+        # or .sh, so "daily-event-cron.sh >" - the tail of a line whose marker
         # directory had no sub-directory - sailed through and became a partner.
         if not _PLAUSIBLE_PARTNER.match(candidate):
-            continue
-        if candidate.lower().endswith((".php", ".sh", ".py", ".pl")):
             continue
         if candidate.lower() in NOT_A_PARTNER:
             continue
@@ -154,6 +184,28 @@ def guess_partner(command: str, known: Optional[set] = None) -> Optional[str]:
         # MySQL and no line in the status sheet. That combination is worth
         # seeing, so the directory name is kept rather than dropped.
         return candidate
+
+    # Not under a partner root at all. A partner's work is not only ingest:
+    # `/var/www/html/venuepilot_nodejs/venue.sh` is venuepilot's site watchdog
+    # and lives nowhere near com_events_venue. Match a path segment that IS a
+    # known partner, or starts with one followed by a separator, so the job
+    # still reaches that partner's page.
+    return _partner_in_path(command, known)
+
+
+# A path segment that is a known partner, optionally with a suffix like
+# `_nodejs` or `-cron`. Anchored to the whole segment so `stagerX` cannot match
+# `stager`, and applied only to names of 4+ characters.
+def _partner_in_path(command: str, known: Optional[set]) -> Optional[str]:
+    if not known:
+        return None
+    segments = {s for s in re.split(r"[/\s]+", command) if s}
+    lowered = {k.lower(): k for k in known if len(k) >= 4}
+    for segment in segments:
+        low = segment.lower()
+        for name, original in lowered.items():
+            if low == name or re.match(rf"^{re.escape(name)}[_-][a-z0-9]+$", low):
+                return original
     return None
 
 
@@ -242,10 +294,15 @@ CATEGORY_LABELS = {key: label for key, label, _ in CATEGORIES}
 _CATEGORY_RULES = [
     # Narrow on purpose. "ping" without word boundaries matched every
     # *_artist_Mapping* job, which is data work, not a health check.
+    # `_nodejs/` and `_nextjs` are here, not under import, because every one of
+    # these scripts was read on the servers and every one is a port check plus a
+    # pm2 restart. `venuepilot_nodejs/venue.sh` greps for :3013 and restarts the
+    # app - it sits in a partner-named directory and touches no data at all.
     ("health", re.compile(
         r"watchdog|kill_process|killprocess|testconnection|\bhealth\b|"
         r"heartbeat|uptime|\bmonitor|\bping\b|site_check|url_check|"
-        r"check_site|restart_|diskspace|mailstatus|checkmail", re.I)),
+        r"check_site|restart_|diskspace|mailstatus|checkmail|"
+        r"_nodejs/|_nextjs|nextjs\.sh|nodejs\.sh|webhook", re.I)),
     ("scraper", re.compile(
         r"scrap|crawl|/spider|fetch_feed|feed_download|selenium|puppeteer", re.I)),
     ("maintenance", re.compile(
@@ -262,9 +319,110 @@ _CATEGORY_RULES = [
     ("import", re.compile(
         r"com_events_venue/|eventpartner|insertevent|insert_event|/insert|"
         r"insert[a-z0-9_-]*\.php|import|event[_-]cron|eventcron|"
-        r"alternate[_-]?cron|altsat|-event-cron|_nodejs/|update_count|"
+        r"alternate[_-]?cron|altsat|-event-cron|update_count|"
         r"updatecount|movie_cronjob|movieweekly|daily_movie|cronjob/", re.I)),
 ]
+
+
+# What a script DOES, read from the script itself.
+#
+# Paths lie. `venuepilot_nodejs/venue.sh` sits in a partner-named directory and
+# looks like an ingest job; it actually runs `netstat | grep :3013` and restarts
+# the Next.js app if the port is dead - a website uptime watchdog with no
+# database access at all. The same is true of eventseeker, cityseeker, cobbar,
+# nearmy and rtr. Reading the file settles it; guessing from the path cannot.
+#
+# Order is by decisiveness, not by display order:
+#   * a port check and a service restart mean a watchdog whatever else is there
+#   * INSERT INTO means the job loads records, even though ingest scripts also
+#     curl the partner's feed - so import is tested before scraper
+#   * unpublish/DELETE is housekeeping, and is tested before the broad CSV rule
+#     because these scripts usually mail a report about what they cleaned up
+_CONTENT_RULES = [
+    # Deliberately narrow. `http_code` and a bare `pkill` were in here and
+    # matched any script that uses curl at all - a push-notification sender and
+    # a proxy fetcher both came back as "website health". A watchdog is
+    # specifically something that inspects whether a service is listening and
+    # restarts it.
+    ("health", re.compile(
+        r"netstat\b|\bss\s+-[tulnp]|not listening|Service running fine|"
+        r"pm2\s+(start|restart|resurrect)|systemctl\s+(restart|status)|"
+        r"supervisorctl|service\s+\w+\s+restart|is not running", re.I)),
+    ("import", re.compile(
+        r"INSERT\s+INTO|REPLACE\s+INTO|insertEvent|insert_event|->\s*insert\s*\(", re.I)),
+    ("maintenance", re.compile(
+        r"unpublish|DELETE\s+FROM|TRUNCATE\s|duplicate", re.I)),
+    ("scraper", re.compile(
+        r"curl_init|CURLOPT_URL|file_get_contents\s*\(\s*[\"']?https?://|"
+        r"Guzzle|simple_html_dom|wget\s+https?://|selenium|puppeteer", re.I)),
+    ("csv", re.compile(
+        r"fputcsv|PHPMailer|\bmail\s*\(|SendMail|fopen\s*\([^)]*\.csv", re.I)),
+]
+
+
+# The same signatures as a flat token list, for grepping the WHOLE file on the
+# server rather than reading its first few KB back.
+#
+# Reading a fixed head was wrong and measurably so: `insertEvent.php` and
+# `insert_events_ticketevolution.php` open with includes and configuration, so
+# their `INSERT INTO` sits past any reasonable head, and both were classified
+# from a stray `fopen(...log)` further up. Grepping costs one line of output per
+# file instead of 2.5 KB, and scans all of it.
+#
+# ERE, single-quote free so it can be embedded in a quoted remote command.
+SIGNATURE_TOKENS = (
+    "netstat|not listening|service running fine|pm2 (start|restart)|"
+    "systemctl (restart|status)|supervisorctl|"
+    "insert into|replace into|insertevent|insert_event|"
+    "unpublish|delete from|truncate table|"
+    "curl_init|curlopt_url|file_get_contents|guzzle|simple_html_dom|"
+    "fputcsv|phpmailer"
+)
+
+# token (lowercased, as grep returns it) -> category. Order of the CATEGORY
+# priority below is what resolves a file that matches several, which most real
+# ingest scripts do - they curl a feed AND insert what they find.
+_TOKEN_CATEGORY = [
+    ("health", ("netstat", "not listening", "service running fine",
+                "pm2 start", "pm2 restart", "systemctl restart",
+                "systemctl status", "supervisorctl")),
+    ("import", ("insert into", "replace into", "insertevent", "insert_event")),
+    ("maintenance", ("unpublish", "delete from", "truncate table")),
+    ("scraper", ("curl_init", "curlopt_url", "file_get_contents", "guzzle",
+                 "simple_html_dom")),
+    ("csv", ("fputcsv", "phpmailer")),
+]
+
+
+def categorise_tokens(tokens) -> Optional[str]:
+    """Category from the signature tokens grepped out of a script.
+
+    A script that both fetches a feed and inserts what it finds is an import
+    job, not a scraper - which is why import is resolved before scraper rather
+    than by whichever token happened to appear first in the file.
+    """
+    found = {t.strip().lower() for t in tokens if t and t.strip()}
+    if not found:
+        return None
+    for category, markers in _TOKEN_CATEGORY:
+        if any(m in found for m in markers):
+            return category
+    return None
+
+
+def categorise_content(body: str) -> Optional[str]:
+    """The category implied by a script's own source, or None if it says nothing.
+
+    None is a real answer - a two-line wrapper that calls another script tells
+    us nothing, and inventing a category from it would be worse than falling
+    back to the path.
+    """
+    if not body or not body.strip():
+        return None
+    for key, pattern in _CONTENT_RULES:
+        if pattern.search(body):
+            return key
+    return None
 
 
 def categorise(script: Optional[str], command: str, name: str = "") -> str:

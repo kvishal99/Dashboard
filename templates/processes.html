@@ -124,7 +124,19 @@ async function loadCron() {
     ],
     // The full command is long enough that truncating it into a column makes it
     // useless, so it lives in the expanded row where it can wrap.
-    expand: (r) => `<dl class="detail-grid">
+    expand: (r) => `${r.log_file ? `<div style="display:flex;gap:var(--s2);flex-wrap:wrap;
+           align-items:center;margin-bottom:var(--s3)">
+        <button class="small" data-view-output="${r.id}">View last 200 lines</button>
+        <a class="btn small primary" href="/download/cron/${r.id}/output" download>Download recent output</a>
+        ${(r.log_size || 0) <= 25 * 1024 * 1024
+          ? `<a class="btn small" href="/download/cron/${r.id}/output?whole=true" download>Download whole file (${fmtBytes(r.log_size)})</a>`
+          : `<button class="small" data-prepare="${r.id}">Prepare whole file (${fmtBytes(r.log_size)})</button>`}
+      </div>
+      <div data-fetch="${r.id}"></div>
+      <div data-output="${r.id}"></div>` : `<div class="notice info" style="margin-bottom:var(--s3)">
+        <div class="body">This crontab line has no <span class="mono">&gt;</span> redirect, so it writes
+        no output file and there is nothing to download.</div></div>`}
+      <dl class="detail-grid">
         <div style="grid-column:1/-1"><dt>Full command</dt>
           <dd class="mono" style="white-space:pre-wrap">${esc(r.command)}</dd></div>
         <div><dt>Category</dt><dd>${esc(r.category_label || 'Other')}</dd></div>
@@ -147,16 +159,30 @@ async function loadCron() {
         render: (r) => `<span class="chip">${esc(r.server)}</span>` },
       { key: 'schedule_human', label: 'Runs', sortDefault: 'asc',
         render: (r) => esc(r.schedule_human || r.schedule || '—') },
+      // Linked only when that partner actually has a page. Some partners have
+      // cron jobs on disk and no rows in MySQL - sportsradar has 18 scheduled
+      // jobs and nothing in the database - so linking every name would hand
+      // out 404s. Naming them is still worth doing: a job running for a
+      // partner we hold nothing for is exactly what someone wants to find.
       { key: 'partner', label: 'Partner', sortDefault: 'asc',
-        render: (r) => (r.partner
-          ? `<a href="/partners/${encodeURIComponent(r.partner)}">${esc(r.partner)}</a>`
-          : '<span class="muted">—</span>') },
+        render: (r) => {
+          if (!r.partner) return '<span class="muted">—</span>';
+          if (r.partner_known) {
+            return `<a href="/partners/${encodeURIComponent(r.partner)}">${esc(r.partner)}</a>`;
+          }
+          return `<span title="This partner has cron jobs but no records in the database, so it has no partner page.">${esc(r.partner)}
+            <div class="sub">no data held</div></span>`;
+        } },
+      // The age doubles as the download link, because "when did it last write"
+      // and "what did it write" are the same question two seconds apart.
       { key: 'log_age_days', label: 'Last output', num: true,
         render: (r) => {
           if (!r.log_file) return '<span class="muted" title="This line has no redirect, so nothing can be inferred">no log</span>';
           if (r.log_mtime === null || r.log_mtime === undefined) return '<span class="muted">—</span>';
           const stale = r.log_age_days > 30;
-          return `<span${stale ? ' style="color:var(--warn);font-weight:600"' : ''}>${r.log_age_days}d ago</span>
+          return `<a href="/download/cron/${r.id}/output" download
+              title="Download the recent output of ${esc(r.name || 'this job')}"
+              ${stale ? 'style="color:var(--warn);font-weight:600"' : ''}>${r.log_age_days}d ago</a>
             ${r.log_size === 0 ? '<div class="sub" style="color:var(--warn)">empty</div>' : ''}`;
         } },
       { key: 'disabled', label: 'Status',
@@ -241,6 +267,118 @@ function renderTiles(pm2, cronSummary, siteRows) {
   document.getElementById('n-cron').textContent = cronSummary.total || '';
   document.getElementById('n-sites').textContent = down || '';
 }
+
+/* Read a job's output without downloading it. Delegated, because the cron
+ * table re-renders on every poll and on every expand. */
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-view-output]');
+  if (!btn) return;
+  const id = btn.dataset.viewOutput;
+  const target = document.querySelector(`[data-output="${id}"]`);
+  if (!target) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Fetching…';
+  target.innerHTML = '<div class="skeleton" style="height:60px"></div>';
+  try {
+    const data = await getJSON(`/api/cron/${id}/output?lines=200`);
+    target.innerHTML = `<div class="panel" style="margin-bottom:var(--s3)">
+      <div class="panel-head">
+        <h3>${esc(data.job.log_file)}</h3>
+        <span class="hint">${fmtBytes(data.job.log_size)} · written ${timeAgo(data.job.log_mtime)}
+          ${data.truncated ? ' · showing the last 200 lines' : ''}</span>
+      </div>
+      <div class="table-scroll" style="--table-max-h:40vh">
+        <pre class="log-line" style="padding:var(--s3);margin:0">${esc(data.lines.join('\n')) || '(the file is empty)'}</pre>
+      </div>
+    </div>`;
+  } catch (err) {
+    target.innerHTML = `<div class="notice bad" style="margin-bottom:var(--s3)">
+      <div class="body">${esc(err.message)}</div></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'View last 200 lines';
+  }
+});
+
+/* Big output files are fetched in the background.
+ *
+ * The largest of these is 426 MB, which no request should try to stream while
+ * a browser waits. Pressing Prepare starts a transfer, this polls it, and the
+ * download appears when the file is on disk here. Pressing it twice joins the
+ * transfer already running rather than starting a second copy.
+ *
+ * Polling stops as soon as the transfer is not running - a page left open on
+ * an expanded row must not poll for ever.
+ */
+const fetchTimers = {};
+
+function renderFetch(id, f) {
+  const target = document.querySelector(`[data-fetch="${id}"]`);
+  if (!target) return;
+  if (!f) { target.innerHTML = ''; return; }
+
+  if (f.status === 'queued' || f.status === 'running') {
+    const pct = f.total_bytes ? Math.min(100, (100 * f.bytes_fetched) / f.total_bytes) : null;
+    target.innerHTML = `<div class="panel" style="margin-bottom:var(--s3)">
+      <div class="panel-body">
+        <div style="font-weight:600;margin-bottom:var(--s2)">Fetching the whole file…</div>
+        <div class="progress ${pct === null ? 'indeterminate' : ''}">
+          <div class="bar" style="${pct === null ? '' : `width:${pct}%`}"></div>
+        </div>
+        <div class="sub" style="margin-top:var(--s2)">
+          ${fmtBytes(f.bytes_fetched)}${f.total_bytes ? ` of ${fmtBytes(f.total_bytes)}` : ''} copied
+        </div>
+      </div></div>`;
+    return;
+  }
+
+  if (f.status === 'failed') {
+    target.innerHTML = `<div class="notice bad" style="margin-bottom:var(--s3)">
+      <div class="body"><strong>The transfer failed.</strong> ${esc(f.error || '')}</div></div>`;
+    return;
+  }
+
+  target.innerHTML = `<div class="notice ok" style="margin-bottom:var(--s3)">
+    <div class="body" style="display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap">
+      <span><strong>Ready.</strong> ${fmtBytes(f.bytes_fetched)}, fetched ${timeAgo(f.finished_at)}.</span>
+      <a class="btn small primary" href="/download/cron-fetch/${f.id}" download>Download whole file</a>
+    </div></div>`;
+}
+
+async function pollFetch(id) {
+  try {
+    const { fetch: f } = await getJSON(`/api/cron/${id}/fetch`);
+    renderFetch(id, f);
+    if (!f || (f.status !== 'queued' && f.status !== 'running')) {
+      clearInterval(fetchTimers[id]);
+      delete fetchTimers[id];
+    }
+  } catch (err) {
+    clearInterval(fetchTimers[id]);
+    delete fetchTimers[id];
+  }
+}
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-prepare]');
+  if (!btn) return;
+  const id = btn.dataset.prepare;
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const { joined } = await postJSON(`/api/cron/${id}/fetch`);
+    toast(joined ? 'Already fetching this file' : 'Fetching in the background', 'ok');
+    await pollFetch(id);
+    clearInterval(fetchTimers[id]);
+    fetchTimers[id] = setInterval(() => pollFetch(id), 1500);
+  } catch (err) {
+    toast(err.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Prepare whole file';
+  }
+});
 
 document.querySelectorAll('.pill[data-tab]').forEach((pill) => {
   pill.addEventListener('click', () => {

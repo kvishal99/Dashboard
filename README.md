@@ -15,8 +15,7 @@ covering only the selected partner:
 | **Overview** | The counts, the comparison bar if one has been run, and the details |
 | **Jobs** | Ingest freshness, then its crontab lines **grouped by what they are for** |
 | **Process Logs** | That partner's activity — collections, feed reports, comparisons, exports, cron output |
-| **Generated Files** | Generate and download the partner's real event CSV; uploaded sheets; comparison rows |
-| **Comparison** | Upload a spreadsheet and diff it against the database |
+| **Generated Files** | Generate and download the partner's real event CSV |
 | **Issues** | Only that partner's open issues |
 
 Everything on the right is fetched per partner, so selecting a different one
@@ -50,6 +49,21 @@ hundred lines about somebody else. Those lines now appear on the partner's own
 Nothing was removed from the back end: `/api/logs`, `/api/logs/files`,
 `/download/log/{name}` and `/download/logs.csv` all still work, and the log
 files are still listed on Downloads.
+
+### Only the partners you look after
+
+120 partners is too many to scan when eight of them are yours. Star a partner in
+the list and **★ Mine** filters down to those. The list is stored server-side
+(`partner_watchlist`), not in the browser, because it describes the team's work
+rather than one laptop - it survives a different machine and everyone sees the
+same short list.
+
+### The spreadsheet comparison has been removed
+
+Uploading a partner sheet and diffing it against the live database is gone from
+the UI, along with the three issue types it raised (missing records, extra
+records, weak match key). The endpoints and tables are still there and still
+work; nothing links to them.
 
 ## The design rule
 
@@ -644,9 +658,17 @@ page lists these, the partner cards count these, and the overview tiles sum
 these — so a card reading "4 issues" and the four rows you get after clicking it
 are the same four things by construction, not by careful maintenance.
 
-Three severities, because a fourth invites arguments about whether something is
-"medium" and the useful question is only *does this need me now, today, or
-never*:
+The page shows two groups - **Broken now** and **Worth watching** - and five
+columns: who, what happened, **what to do**, when it last ran, and a Run again
+button where re-running can actually help. Both earlier versions were hard to
+read for the same reason: they described problems in the system's own words
+("Ingest job stalled", kind `job_stalled`, scope `partner`, value 118) and left
+the reader to work out what that meant for them. Titles are now plain
+("Stopped importing events") and every issue carries a one-sentence next step.
+
+Three severities underneath, because a fourth invites arguments about whether
+something is "medium" and the useful question is only *does this need me now,
+today, or never*:
 
 | | |
 |---|---|
@@ -811,6 +833,8 @@ except the `x-agent-secret` POSTs, which never do.
 | `GET /api/partners/{name}/export` | Newest export for that partner, plus history |
 | `GET /api/exports/{id}` | One export's status, polled while it generates |
 | `DELETE /api/exports/{id}` | Remove a generated file |
+| `GET /api/watchlist` | The partners someone has starred |
+| `POST /api/watchlist/{name}` | Star a partner (`DELETE` to unstar, `PUT` to replace the list) |
 | `GET /api/issues` | Every open issue (`?severity=&scope=&kind=&q=`) |
 | `GET /api/logs` | Filtered, paged log lines |
 | `GET /api/logs/files` | Which logs can be read |
@@ -843,6 +867,8 @@ this natively in the browser, so nothing is lost on the client side.
 | `/download/partner/{name}/history.csv` | One partner's count history |
 | `/download/comparison/{id}/missing.csv` | The rows behind a comparison (also `extra.csv`) |
 | `/download/export/{id}` | A generated partner event CSV |
+| `/download/cron/{id}/output` | One cron job's own output file (tail by default) |
+| `/download/cron-fetch/{id}` | A big output file fetched in the background |
 | `/download/log/{name}` | A whole log file |
 | `/download/logs.csv` | The log as currently filtered |
 | `/download/upload/{id}` | An uploaded spreadsheet, as it was uploaded |
@@ -1051,15 +1077,35 @@ that password auth needs `setsid` on the box running it: ssh prompts on the
 terminal otherwise, because `SSH_ASKPASS_REQUIRE` only exists in OpenSSH ≥ 8.4
 and RHEL/Rocky 8 ships 8.0.
 
-Current state — **425 jobs across 3 servers**:
+Current state — **431 jobs across 4 servers**, both main boxes re-collected
+over SSH on 2026-08-04:
 
-| Server | Jobs |
-|---|---|
-| `44.198.210.209` (ip-10-0-0-153) | 268 |
-| `3.94.49.56` (ip-10-0-0-242) | 145 |
-| `100.52.8.134` (ip-10-0-0-117) | 12 |
+| Server | Jobs | Collected |
+|---|---|---|
+| `44.198.210.209` (ip-10-0-0-153) | 272 | 2026-08-04 |
+| `3.94.49.56` (ip-10-0-0-242) | 145 | 2026-08-04 |
+| `100.52.8.134` (ip-10-0-0-117) | 12 | 2026-07-30 |
+| `10.0.0.117` (vishal-konale) | 2 | 2026-07-30 |
 
-307 active, 118 commented out, 66 matched to a known partner.
+311 active, 120 commented out, 54 matched to a known partner across 31 partners.
+
+Both main servers answer password auth, so `collect-crons.py` works against
+them directly:
+
+```bash
+./venv/bin/python collect-crons.py 44.198.210.209 3.94.49.56
+```
+
+The partner script directories those crontabs run out of are:
+
+```
+44.198.210.209:/var/www/html/admin/administrator/components/com_events_venue/   172 dirs
+3.94.49.56:/home/fcampbell/eventPartner_174/                                     78 dirs
+3.94.49.56:/home/fcampbell/eventPartner/                                         72 dirs
+```
+
+Those three paths are exactly the markers `cron_parse.guess_partner()` looks
+for, which is why a partner name can be recovered from a cron line at all.
 
 ### "Last output" — did it actually run?
 
@@ -1115,7 +1161,7 @@ than claiming a missing cron.
 
 ### Not every cron job is a data insertion
 
-They were all presented as though they were. Of the 289 lines collected, only
+They were all presented as though they were. Of the 431 lines collected, only
 about a fifth actually insert events; the rest watch processes, generate CSV
 feeds, unpublish duplicates or push images to a CDN — different work, different
 people, and a different reaction when one breaks.
@@ -1124,12 +1170,14 @@ people, and a different reaction when one breaks.
 
 | Category | What lands there | Count |
 |---|---|---|
-| **Website Health** | watchdogs, process killers, connectivity probes | 7 |
-| **Scrapers** | scrapers, crawlers, feed downloads | 7 |
-| **Import Jobs** | anything that inserts or updates event records | 59 |
-| **CSV & Reports** | feed exports, counts, mailed reports | 27 |
-| **Maintenance** | unpublishing duplicates, expiry, image and index upkeep | 84 |
-| **Other** | genuinely miscellaneous one-offs | 105 |
+| **Website Health** | watchdogs, process killers, connectivity probes | 13 |
+| **Scrapers** | scrapers, crawlers, feed downloads | 17 |
+| **Import Jobs** | anything that inserts or updates event records | 84 |
+| **CSV & Reports** | feed exports, counts, mailed reports | 43 |
+| **Maintenance** | unpublishing duplicates, expiry, image and index upkeep | 100 |
+| **Other** | genuinely miscellaneous one-offs | 174 |
+
+(431 lines, collected from both servers on 2026-08-04.)
 
 Two things make this work on real data:
 
@@ -1156,8 +1204,38 @@ of the shared-machinery directories in `cron_parse.NOT_A_PARTNER`.
 
 Directories that *are* partners but appear in neither MySQL nor the status sheet
 are still kept — `fandango`, `ticketsnow` and `reservix` all have crons while
-having no rows and no sheet line, which is worth seeing. Net effect on real
-data: the 3 invented partners are gone, all 18 real ones remain.
+having no rows and no sheet line, which is worth seeing.
+
+Two further fixes came out of reading the real crontabs:
+
+- **The parser is told about every partner we know of**, not just the ones in
+  the status sheet. It used to be passed `partner_meta` alone, which discarded
+  the 120 partners already discovered from MySQL.
+- **Wrapper scripts in the partner root are matched by filename.** 16 lines are
+  shaped like `com_events_venue/viagogo_weekly_event_cron.sh` — a script rather
+  than a partner directory. The partner name is taken from the filename, but
+  only ever by matching against the known list, longest name first, so
+  `daily_event_cron_eventim_ticketcity_eventim-uk.sh` resolves to `eventim-uk`
+  rather than `eventim`.
+
+Net effect on real data: 3 invented partners gone, and attribution up from 18
+partners / 37 lines to **31 partners / 54 lines**. The 34 lines still
+unattributed under a partner root are correct: 17 are `UnpublishDuplicates`,
+and the rest are generic multi-partner wrappers (`weekly-event-cron.sh`,
+`not_inserted_cron_185.sh`) that name no partner at all.
+
+### Partners with cron jobs and no data
+
+Nine of the 31 have scripts on disk and **no rows in MySQL** — `sportsradar`
+has 18 scheduled jobs and nothing in the database, and `fandango`,
+`ticketsnow`, `reservix`, `bemyguest`, `Black_Widow`, `stats_sports`,
+`ticketpoint_nl` and `eventim-uk` are the same shape.
+
+They are named on the Processes page but **not linked**, because the partner
+list is discovered from MySQL and `/partners/<name>` 404s for them. `/api/cron`
+carries `partner_known` per row so the UI can tell the difference. A job
+running for a partner we hold nothing for is one of the more useful things on
+that page — it should be visible, and it should not be a dead link.
 
 ### Job names
 

@@ -243,7 +243,25 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
+
+/* Star a partner to keep it in your own short list. Dim until starred, so 120
+ * unstarred rows do not read as 120 pieces of punctuation. */
+.pick-item .star {
+  border: none;
+  background: none;
+  padding: 0;
+  line-height: 1;
+  font-size: var(--text-md);
+  color: var(--border-strong);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.pick-item .star:hover { color: var(--warn); background: none; }
+.pick-item .star.on { color: #d8a200; }
 .pick-item .when {
   grid-column: 1 / -1;
   font-size: var(--text-xs);

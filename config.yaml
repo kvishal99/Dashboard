@@ -82,6 +82,16 @@ app:
   # still a usable file, and the row count in the UI says how many it holds.
   max_export_rows: 0
 
+  # ---- Fetched cron output -------------------------------------------------
+  # Where whole cron output files pulled off the servers are kept. These can be
+  # large (the biggest on record is 426 MB), so they are pruned on the same
+  # schedule as generated exports.
+  fetch_dir: "fetched"
+  # Refuses a single transfer larger than this, in MB. A guard against filling
+  # the disk with one click, not a normal limit - 426 MB moves in about 8s
+  # because the file is gzipped in transit.
+  max_fetch_mb: 2000
+
   # ---- Logs ----------------------------------------------------------------
   # Written by the app itself so the Logs page has something to read even when
   # the process was not started under systemd. Relative paths sit beside the code.

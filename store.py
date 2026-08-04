@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
     -- other. Every line used to be presented as a data insertion, which is what
     -- most of these are not - see cron_parse.CATEGORIES.
     category      TEXT,
+    -- "content" when the category came from reading the script on the server,
+    -- "path" when it was inferred from the path. Worth recording: a path guess
+    -- called every *_nodejs/*.sh an import job, and reading them showed they
+    -- are website watchdogs.
+    category_source TEXT,
     log_file      TEXT,               -- redirect target, if the line has one
     log_mtime     REAL,               -- when that file was last written
     log_size      INTEGER,
@@ -205,6 +210,40 @@ CREATE TABLE IF NOT EXISTS event_exports (
 );
 CREATE INDEX IF NOT EXISTS idx_export_partner
     ON event_exports (partner, id DESC);
+
+-- A request to pull one cron job's whole output file off its server.
+--
+-- Separate from the inline download because these files are big: the largest
+-- on record is 426 MB, and a request that sits there for minutes is a timeout,
+-- not a download. The row carries its own progress so the page can show
+-- "180 MB of 426 MB" while it transfers.
+CREATE TABLE IF NOT EXISTS cron_fetches (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id        INTEGER NOT NULL,      -- the cron_jobs row this came from
+    server        TEXT NOT NULL,
+    remote_path   TEXT NOT NULL,
+    status        TEXT NOT NULL,         -- queued | running | done | failed
+    bytes_fetched INTEGER NOT NULL DEFAULT 0,
+    total_bytes   INTEGER,               -- re-stat-ed when the fetch starts
+    filename      TEXT,
+    stored_path   TEXT,
+    error         TEXT,
+    requested_at  REAL NOT NULL,
+    started_at    REAL,
+    finished_at   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_cron_fetch_job ON cron_fetches (job_id, id DESC);
+
+-- The partners someone actually watches.
+--
+-- 120 partners is too many to scan when you look after eight of them. This is
+-- stored server-side rather than in the browser on purpose: it is a property of
+-- the team's work, not of one laptop, so it survives a different machine and
+-- everyone sees the same short list.
+CREATE TABLE IF NOT EXISTS partner_watchlist (
+    partner  TEXT PRIMARY KEY,
+    added_at REAL NOT NULL
+);
 """
 
 
@@ -241,6 +280,8 @@ class Store:
             cron_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cron_jobs)")}
             if cron_cols and "category" not in cron_cols:
                 conn.execute("ALTER TABLE cron_jobs ADD COLUMN category TEXT")
+            if cron_cols and "category_source" not in cron_cols:
+                conn.execute("ALTER TABLE cron_jobs ADD COLUMN category_source TEXT")
 
     # -------------------------------------------------------- partner counts
 
@@ -369,14 +410,14 @@ class Store:
             conn.executemany(
                 """INSERT INTO cron_jobs
                    (server, hostname, line_no, schedule, schedule_human, command,
-                    name, script, partner, category, log_file, log_mtime,
-                    log_size, disabled, collected_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    name, script, partner, category, category_source, log_file,
+                    log_mtime, log_size, disabled, collected_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(server, hostname, r.get("line_no"), r.get("schedule"),
                   r.get("schedule_human"), r["command"], r.get("name"),
                   r.get("script"),
-                  r.get("partner"), r.get("category"), r.get("log_file"),
-                  r.get("log_mtime"),
+                  r.get("partner"), r.get("category"), r.get("category_source"),
+                  r.get("log_file"), r.get("log_mtime"),
                   r.get("log_size"), 1 if r.get("disabled") else 0, now)
                  for r in rows],
             )
@@ -388,6 +429,19 @@ class Store:
                 "SELECT * FROM cron_jobs ORDER BY server, line_no"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def cron_job(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """One crontab row. The only way a caller names a file to fetch.
+
+        Output downloads resolve the path from this row rather than accepting
+        one from the request: a path is user input, and `/etc/shadow` must not
+        be fetchable just because it was typed into a URL.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM cron_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def cron_jobs_for_partner(self, partner: str) -> List[Dict[str, Any]]:
         """Only this partner's crontab lines - matched case-insensitively.
@@ -702,6 +756,111 @@ class Store:
                 (time.time(),),
             )
         return cursor.rowcount
+
+    # ------------------------------------------------- cron output fetches
+
+    def create_fetch(self, job_id: int, server: str, remote_path: str,
+                     total_bytes: Optional[int] = None) -> int:
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO cron_fetches
+                   (job_id, server, remote_path, status, total_bytes, requested_at)
+                   VALUES (?,?,?,'queued',?,?)""",
+                (job_id, server, remote_path, total_bytes, time.time()),
+            )
+        return cursor.lastrowid
+
+    def update_fetch(self, fetch_id: int, **fields: Any) -> None:
+        allowed = {"status", "bytes_fetched", "total_bytes", "filename",
+                   "stored_path", "error", "started_at", "finished_at"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        assignments = ", ".join(f"{k} = ?" for k in sets)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE cron_fetches SET {assignments} WHERE id = ?",
+                list(sets.values()) + [fetch_id],
+            )
+
+    def fetch_row(self, fetch_id: int) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM cron_fetches WHERE id = ?", (fetch_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def latest_fetch(self, job_id: int) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM cron_fetches WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def active_fetch(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """A queued or running fetch for this job, so the button is idempotent."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM cron_fetches WHERE job_id = ?
+                   AND status IN ('queued','running') ORDER BY id DESC LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def fetches(self, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cron_fetches ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_fetch(self, fetch_id: int) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM cron_fetches WHERE id = ?", (fetch_id,))
+
+    def reset_running_fetches(self) -> int:
+        """Fail any transfer left mid-flight by a restart, as for exports."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """UPDATE cron_fetches
+                   SET status = 'failed', finished_at = ?,
+                       error = 'the dashboard restarted while this transfer was running'
+                   WHERE status IN ('queued','running')""",
+                (time.time(),),
+            )
+        return cursor.rowcount
+
+    # ------------------------------------------------------------- watchlist
+
+    def watchlist(self) -> List[str]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT partner FROM partner_watchlist ORDER BY partner COLLATE NOCASE"
+            ).fetchall()
+        return [r["partner"] for r in rows]
+
+    def watch(self, partner: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO partner_watchlist (partner, added_at) VALUES (?,?)
+                   ON CONFLICT(partner) DO NOTHING""",
+                (partner, time.time()),
+            )
+
+    def unwatch(self, partner: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM partner_watchlist WHERE partner = ?", (partner,))
+
+    def set_watchlist(self, partners: List[str]) -> None:
+        """Replace the whole list in one transaction."""
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute("DELETE FROM partner_watchlist")
+            conn.executemany(
+                "INSERT INTO partner_watchlist (partner, added_at) VALUES (?,?)",
+                [(p, now) for p in dict.fromkeys(partners)],
+            )
 
     # ------------------------------------------------------------ site checks
 

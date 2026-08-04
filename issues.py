@@ -31,7 +31,7 @@ def _issue(
     title: str, detail: str, link: Optional[str] = None,
     value: Optional[Any] = None, since: Optional[float] = None,
     last_run: Optional[float] = None, retry: Optional[str] = None,
-    process: Optional[str] = None,
+    process: Optional[str] = None, action: str = "",
 ) -> Dict[str, Any]:
     return {
         # Stable enough to key a UI row on, and to dedupe across a refresh.
@@ -46,6 +46,10 @@ def _issue(
         "process": process or subject,
         "title": title,
         "detail": detail,
+        # What to actually do about it, in one short sentence. An issue list
+        # that only names problems leaves everyone guessing at the next step,
+        # which is what made the old page hard to act on.
+        "action": action,
         "link": link,
         "value": value,
         "since": since,
@@ -77,20 +81,22 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     if row.get("ok") is False:
         found.append(_issue(
             CRITICAL, "query_failed", "partner", name,
-            "Count query failed",
+            "Could not read the database",
             row.get("error") or "The last count query against MySQL errored, so "
                                 "every number for this partner is stale.",
             link, since=row.get("collected_at"),
             last_run=ran, retry=retry, process=f"{name} · hourly count sweep",
+            action="Check the database connection, then re-run the count.",
         ))
     elif row.get("ok") is None:
         found.append(_issue(
             INFO, "never_collected", "partner", name,
-            "Never counted",
+            "Not counted yet",
             "No counts have been collected for this partner yet. The MySQL "
             "sweep runs on the top of every hour.",
             link,
             last_run=ran, retry=retry, process=f"{name} · hourly count sweep",
+            action="Nothing to do - the next hourly sweep will pick it up.",
         ))
 
     # --- is the ingest job still running? ---------------------------------
@@ -102,7 +108,8 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
         removed = row.get("cron_status") == "missing"
         found.append(_issue(
             CRITICAL, "job_removed" if removed else "job_stalled", "partner", name,
-            "Ingest job removed" if removed else "Ingest job stalled",
+            "Stopped importing - nothing scheduled to run it" if removed
+            else "Stopped importing events",
             (f"Nothing inserted for {days:.0f} days"
              if days is not None else "Nothing inserted for a long time")
             + (f", and no crontab entry exists on {row.get('server') or 'its server'} "
@@ -113,88 +120,59 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             link, value=days,
             last_run=ran, retry=retry,
             process=f"{name} · ingest job ({row.get('frequency') or 'no schedule'})",
+            action=("Add a crontab entry on " + (row.get("server") or "its server")
+                    + " - the job is not scheduled anywhere.") if removed
+                   else "Check the ingest script on " + (row.get("server") or "its server")
+                    + " and its log for errors.",
         ))
     elif state == "late":
         found.append(_issue(
             WARNING, "job_late", "partner", name,
-            "Ingest job late",
+            "Import is overdue",
             f"Overdue by {row.get('job_overdue_by') or 0:.0f} days against its "
             f"'{row.get('frequency') or 'unknown'}' schedule, but still inside "
             "the grace window.",
             link, value=row.get("job_overdue_by"),
             last_run=ran, retry=retry,
             process=f"{name} · ingest job ({row.get('frequency') or 'no schedule'})",
+            action="Watch it - if it does not catch up by the next run, check the script.",
         ))
     elif state == "never":
         found.append(_issue(
             WARNING, "job_never", "partner", name,
-            "Nothing ever inserted",
+            "Never imported anything",
             "This partner has no records at all - the ingest has never "
             "successfully run.",
             link,
             last_run=ran, retry=retry, process=f"{name} · ingest job",
+            action="Confirm this partner is meant to be live, then check its script.",
         ))
 
     # --- is anything actually live? ---------------------------------------
     if row.get("ok") and row.get("feed_total") and not row.get("db_future"):
         found.append(_issue(
             CRITICAL, "none_live", "partner", name,
-            "Nothing live",
+            "No events showing on the site",
             f"We hold {row['feed_total']:,} records but none are published and "
             "still upcoming. The ingest is landing, but nothing is reaching the site.",
             link, value=row.get("feed_total"),
             last_run=ran, retry=retry, process=f"{name} · publishing",
+            action="The import works but nothing is published - check the publish step.",
         ))
     elif row.get("unpublished_pct") is not None and row["unpublished_pct"] >= 50:
         found.append(_issue(
             WARNING, "unpublished", "partner", name,
-            "Half of records never published",
+            "Most events are not visible on the site",
             f"{row.get('db_unpublished') or 0:,} of {row.get('feed_total') or 0:,} "
             f"records ({row['unpublished_pct']:.0f}%) inserted but never went live.",
             link, value=row.get("db_unpublished"),
             last_run=ran, retry=retry, process=f"{name} · publishing",
+            action="Check why these events were inserted but never published.",
         ))
 
-    # --- spreadsheet vs database ------------------------------------------
-    comparison = row.get("comparison")
-    if comparison and comparison.get("ok"):
-        if comparison.get("missing"):
-            found.append(_issue(
-                CRITICAL if comparison["missing"] > (comparison.get("sheet_total") or 0) * 0.25
-                else WARNING,
-                "missing_tours", "partner", name,
-                "Records missing from the database",
-                f"{comparison['missing']:,} of {comparison.get('sheet_total') or 0:,} "
-                f"rows in the partner spreadsheet have no match in our database "
-                f"(matched on {comparison.get('strategy_label')}).",
-                f"{link}#comparison", value=comparison["missing"],
-                since=comparison.get("computed_at"),
-                last_run=comparison.get("computed_at"),
-                process=f"{name} · spreadsheet comparison",
-            ))
-        if comparison.get("extra"):
-            found.append(_issue(
-                WARNING, "extra_tours", "partner", name,
-                "Extra records in the database",
-                f"{comparison['extra']:,} records exist in our database with no "
-                "row in the partner spreadsheet - usually withdrawn tours that "
-                "were never removed on our side.",
-                f"{link}#comparison", value=comparison["extra"],
-                since=comparison.get("computed_at"),
-                last_run=comparison.get("computed_at"),
-                process=f"{name} · spreadsheet comparison",
-            ))
-        if comparison.get("reliable") is False:
-            found.append(_issue(
-                INFO, "weak_match", "partner", name,
-                "Comparison key is weak",
-                f"Only {comparison.get('match_rate', 0) * 100:.0f}% of rows matched "
-                f"on {comparison.get('strategy_label')}. The missing/extra counts "
-                "above are probably measuring a column mismatch, not real gaps.",
-                f"{link}#comparison",
-                last_run=comparison.get("computed_at"),
-                process=f"{name} · spreadsheet comparison",
-            ))
+    # The spreadsheet comparison used to raise three more issues here
+    # (missing_tours, extra_tours, weak_match). That feature was removed from
+    # the UI, and an issue nobody can open a page to act on is noise.
 
     found.sort(key=lambda i: i["rank"])
     return found
@@ -204,13 +182,14 @@ def for_site(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     if row.get("ok") is False:
         return [_issue(
             CRITICAL, "site_down", "site", row["name"],
-            "Website not responding",
+            "Website is down",
             row.get("error") or f"The last check failed "
                                 f"(HTTP {row.get('status_code') or 'no response'}).",
             "/processes#sites", since=row.get("checked_at"),
             last_run=row.get("checked_at"),
             retry=f"/api/sites/refresh?url={quote(row.get('url') or '', safe='')}",
             process=f"{row['name']} · website health check",
+            action="Open the site. If it loads, the check may need its expected status updating.",
         )]
     return []
 
@@ -220,23 +199,25 @@ def for_server(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     if row.get("stale"):
         found.append(_issue(
             WARNING, "server_offline", "process", row["server_id"],
-            "No heartbeat from server",
+            "Server stopped reporting",
             f"This server's agent has not reported for {row.get('age_seconds', 0):.0f}s, "
             "so its process list is stale. Usually the agent or its tunnel is "
             "down rather than the box itself.",
             "/processes", since=row.get("last_updated"),
             last_run=row.get("last_updated"),
             process=f"{row['server_id']} · PM2 agent heartbeat",
+            action="Restart the agent on that server, or check the tunnel is up.",
         ))
     if row.get("errored_count"):
         found.append(_issue(
             CRITICAL, "process_errored", "process", row["server_id"],
-            "PM2 processes errored",
+            "Processes have crashed",
             f"{row['errored_count']} of {row.get('total_count', 0)} processes on "
             "this server are in an errored state - they crashed or failed to start.",
             "/processes", value=row["errored_count"],
             last_run=row.get("last_updated"),
             process=f"{row['server_id']} · PM2 processes",
+            action="Run `pm2 list` on that server and restart the errored processes.",
         ))
     return found
 
@@ -258,7 +239,7 @@ def collect(
     if not db_ok:
         found.append(_issue(
             CRITICAL, "db_unreachable", "system", "MySQL",
-            "Database unreachable",
+            "Database is unreachable",
             db_detail or "The partner database is not answering, so no counts "
                          "can be collected and every number shown is stale.",
             "/settings",

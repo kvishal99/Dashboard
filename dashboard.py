@@ -21,7 +21,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -29,6 +30,7 @@ from pydantic import BaseModel, Field
 import activity as activity_mod
 import applog
 import compare as compare_mod
+import cron_collect
 import cron_parse
 import event_export
 import exports
@@ -105,6 +107,9 @@ async def lifespan(app: FastAPI):
     orphaned = store.reset_running_exports()
     if orphaned:
         print(f"[exports] marked {orphaned} interrupted export(s) as failed")
+    stranded = store.reset_running_fetches()
+    if stranded:
+        print(f"[fetch] marked {stranded} interrupted transfer(s) as failed")
 
     if SCHEDULER_ENABLED:
         scheduler.start()
@@ -155,6 +160,19 @@ def _iso(ts: Optional[float]) -> Optional[str]:
 def known_partners() -> List[str]:
     """Partners we have counts for - discovered from the database, not configured."""
     return sorted(store.latest_counts().keys(), key=str.lower)
+
+
+def known_partner_names() -> set:
+    """Every partner name worth matching a crontab path against.
+
+    Both sources, because neither is complete on its own: the status sheet is
+    missing partners that are live in MySQL, and MySQL is missing partners that
+    have a cron job but no rows (fandango, ticketsnow and reservix all have
+    scripts on disk and nothing in the database). Matching against only
+    partner_meta - which is what this used to pass - threw away the 120
+    partners the dashboard had already discovered.
+    """
+    return set(store.latest_counts().keys()) | set(config.partner_meta.keys())
 
 
 def build_partner_rows(with_comparison: bool = True) -> List[Dict[str, Any]]:
@@ -440,11 +458,6 @@ CARD_FIELDS = (
 
 def to_card(row: Dict[str, Any]) -> Dict[str, Any]:
     card = {key: row.get(key) for key in CARD_FIELDS}
-    comparison = row.get("comparison") or {}
-    # Two numbers, not the row lists behind them - those load when the partner
-    # is opened.
-    card["missing"] = comparison.get("missing")
-    card["extra"] = comparison.get("extra")
     card["worst_issue"] = row["issues"][0]["title"] if row.get("issues") else None
     return card
 
@@ -531,22 +544,62 @@ async def api_overview():
     for row in partners:
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
 
-    compared = [p for p in partners if p.get("comparison")]
+    watched = set(store.watchlist())
+    cards = [to_card(row) for row in partners]
+    for card in cards:
+        card["watched"] = card["name"] in watched
+
     return {
-        "cards": [to_card(row) for row in partners],
+        "cards": cards,
+        "watchlist": sorted(watched),
         "summary": {
             **summary,
             "issues": issue_summary,
             "by_status": by_status,
             "healthy": by_status.get("success", 0),
-            # The comparison headline, across every partner that has one.
-            "compared_partners": len(compared),
-            "total_missing": sum(p["comparison"].get("missing") or 0 for p in compared),
-            "total_extra": sum(p["comparison"].get("extra") or 0 for p in compared),
         },
         "jobs": scheduler.status(),
         "now": time.time(),
     }
+
+
+# ---------------------------------------------------------------------------
+# API - the watchlist
+#
+# Which partners this team actually looks after. 120 in a list is too many to
+# scan when eight of them are yours, so the partner list can be narrowed to
+# these - see store.partner_watchlist for why it is stored server-side.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/watchlist")
+async def api_watchlist():
+    return {"watchlist": store.watchlist()}
+
+
+@app.post("/api/watchlist/{partner_name}")
+async def api_watch(partner_name: str):
+    _require_partner(partner_name)
+    store.watch(partner_name)
+    return {"status": "ok", "watchlist": store.watchlist()}
+
+
+@app.delete("/api/watchlist/{partner_name}")
+async def api_unwatch(partner_name: str):
+    # Deliberately not _require_partner: a partner that has since dropped out of
+    # the database must still be removable, or the list can never be cleaned up.
+    store.unwatch(partner_name)
+    return {"status": "ok", "watchlist": store.watchlist()}
+
+
+class WatchlistUpdate(BaseModel):
+    partners: List[str]
+
+
+@app.put("/api/watchlist")
+async def api_set_watchlist(update: WatchlistUpdate):
+    store.set_watchlist(update.partners)
+    return {"status": "ok", "watchlist": store.watchlist()}
 
 
 # ---------------------------------------------------------------------------
@@ -752,53 +805,37 @@ async def api_partner_files(partner_name: str):
     """
     _require_partner(partner_name)
 
-    uploads = store.uploads(partner_name, limit=50)
-    comparison = store.latest_comparison(partner_name)
     export_rows = store.exports(partner_name, limit=20)
+    partner_row = _partner_row(partner_name)
 
-    generated = [{
-        "kind": "export", "id": row["id"], "name": row["filename"]
-        or f"{partner_name}-events.csv",
-        "href": f"/download/export/{row['id']}",
-        "status": row["status"],
-        "rows": row["rows_written"],
-        "size": row["size_bytes"],
-        "scope": row["scope"],
-        "created_at": row["finished_at"] or row["requested_at"],
-        "detail": (
-            f"{row['rows_written']:,} events · "
-            f"{event_export.describe_scope(row['scope'])}"
-            if row["status"] == "done"
-            else f"{row['status']}: {row['error'] or 'in progress'}"
-        ),
-        "available": row["status"] == "done"
-        and bool(row["stored_path"]) and os.path.isfile(row["stored_path"]),
-    } for row in export_rows]
-
-    comparison_files = []
-    if comparison and comparison.get("ok"):
-        for side, label in (("missing", "Missing from database"),
-                            ("extra", "Extra in database")):
-            count = comparison.get(side) or 0
-            if count:
-                comparison_files.append({
-                    "kind": "comparison", "name": f"{label} ({count:,} rows)",
-                    "href": f"/download/comparison/{comparison['id']}/{side}.csv",
-                    "detail": f"from the comparison run {_iso(comparison['computed_at'])}",
-                    "available": True,
-                })
+    generated = []
+    for row in export_rows:
+        stale = _export_is_stale(row, partner_row)
+        generated.append({
+            "kind": "export", "id": row["id"],
+            "name": row["filename"] or f"{partner_name}-events.csv",
+            "href": f"/download/export/{row['id']}",
+            "status": row["status"],
+            "rows": row["rows_written"],
+            "total": row["total_rows"],
+            "size": row["size_bytes"],
+            "scope": row["scope"],
+            "created_at": row["finished_at"] or row["requested_at"],
+            # Whether the database has changed since the file was written.
+            "stale": stale,
+            "detail": (
+                f"{row['rows_written']:,} events · "
+                f"{event_export.describe_scope(row['scope'])}"
+                if row["status"] == "done"
+                else f"{row['status']}: {row['error'] or 'in progress'}"
+            ),
+            "available": row["status"] == "done"
+            and bool(row["stored_path"]) and os.path.isfile(row["stored_path"]),
+        })
 
     return {
         "partner": partner_name,
         "generated": generated,
-        "comparisons": comparison_files,
-        "uploads": [{
-            "kind": "upload", "id": row["id"], "name": row["filename"],
-            "href": f"/download/upload/{row['id']}",
-            "detail": f"{row['row_count'] or 0:,} rows · uploaded {_iso(row['uploaded_at'])}",
-            "available": bool(row.get("stored_path")
-                              and os.path.isfile(row["stored_path"])),
-        } for row in uploads],
         # Always available, and cheap - it is generated from SQLite on request.
         "history": {
             "name": "Count history (CSV)",
@@ -993,6 +1030,37 @@ async def api_delete_upload(upload_id: int):
 # ---------------------------------------------------------------------------
 
 
+def _drop_superseded(partner_name: str, scope: str, keep: int) -> None:
+    """Delete this partner's older exports of the same scope, file and all."""
+    for row in store.exports(partner_name, limit=50):
+        if row["id"] == keep or row["scope"] != scope:
+            continue
+        if row["status"] in ("queued", "running"):
+            continue
+        path = row.get("stored_path")
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        store.delete_export(row["id"])
+
+
+def _export_is_stale(row: Dict[str, Any], partner_row: Dict[str, Any]) -> bool:
+    """Has the data moved on since this file was written?
+
+    A generated CSV is a snapshot. If the hourly sweep has since counted this
+    partner again, or the partner has inserted a record newer than the file,
+    then the file no longer matches the database and the page has to say so -
+    otherwise someone downloads yesterday's rows believing they are today's.
+    """
+    finished = row.get("finished_at")
+    if not finished:
+        return False
+    collected = partner_row.get("collected_at")
+    return bool(collected and collected > finished)
+
+
 async def _run_export(export_id: int, partner_name: str, scope: str) -> None:
     """Build one export, updating its row as it goes. Runs as a background task."""
     stored_name = exports.safe_filename(
@@ -1028,6 +1096,11 @@ async def _run_export(export_id: int, partner_name: str, scope: str) -> None:
             export_id, status="done", rows_written=result["rows"],
             size_bytes=result["size"], finished_at=time.time(), error=None,
         )
+        # The file this one replaces is deleted immediately rather than left to
+        # the nightly prune. A list of five same-named CSVs from five different
+        # afternoons is how someone downloads last week's data by accident -
+        # only the current one should ever be on offer.
+        _drop_superseded(partner_name, scope, keep=export_id)
     except Exception as exc:
         # The half-written file is removed: a partial CSV that downloads
         # cleanly is worse than none, because nothing about it says it is short.
@@ -1329,7 +1402,7 @@ async def api_cron_report(report: CronReport, x_agent_secret: str = Header(None)
     if x_agent_secret != config.agent_secret:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    rows = cron_parse.parse_crontab(report.crontab, set(config.partner_meta.keys()))
+    rows = cron_parse.parse_crontab(report.crontab, known_partner_names())
     for row in rows:
         stat = report.logs.get(row["log_file"]) if row["log_file"] else None
         if stat:
@@ -1414,6 +1487,7 @@ async def api_cron():
     """Every crontab line collected from the servers, newest write first."""
     rows = store.cron_jobs()
     now = time.time()
+    counted = set(store.latest_counts().keys())
     for r in rows:
         r["log_age_days"] = (
             round((now - r["log_mtime"]) / 86400.0, 1) if r["log_mtime"] else None
@@ -1426,6 +1500,15 @@ async def api_cron():
                 r.get("script"), r.get("command") or "", r.get("name") or ""
             )
         r["category_label"] = cron_parse.CATEGORY_LABELS.get(r["category"], "Other")
+        # Whether that partner has a page to link to.
+        #
+        # Some partners have cron jobs on disk and no rows in MySQL at all -
+        # sportsradar has 18 scheduled jobs and nothing in the database, and
+        # fandango, ticketsnow, reservix and bemyguest are the same shape.
+        # Naming them is useful (a job running for a partner we hold nothing
+        # for is worth seeing), but /partners/<name> 404s for them, so the UI
+        # needs to know not to link.
+        r["partner_known"] = bool(r["partner"]) and r["partner"] in counted
     servers = store.cron_servers()
     if config.cron_source == "agent":
         # Nothing is scheduled on this side - the servers push. Report when the
@@ -1473,6 +1556,199 @@ async def api_cron():
         },
         "now": now,
     }
+
+
+# ---------------------------------------------------------------------------
+# A cron job's own output file
+#
+# The Processes table records where each job redirects its output and when that
+# file was last written, which answers "did it run" but never "what did it
+# say". These two fetch the file itself from the server it lives on.
+#
+# The path is always taken from the stored crontab row, never from the request.
+# A path is user input, and nothing here should be able to fetch /etc/shadow
+# because someone typed it into a URL.
+# ---------------------------------------------------------------------------
+
+# Enough to hold a big run log's tail, small enough to stay a quick request.
+CRON_OUTPUT_CAP = 25 * 1024 * 1024
+
+
+def _cron_output_job(job_id: int) -> Dict[str, Any]:
+    job = store.cron_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="unknown cron job")
+    if not job.get("log_file"):
+        raise HTTPException(
+            status_code=400,
+            detail="this crontab line has no output redirect, so there is no "
+                   "file to fetch - nothing about it can be shown.",
+        )
+    return job
+
+
+@app.get("/api/cron/{job_id}/output")
+async def api_cron_output(job_id: int, lines: int = Query(200, ge=1, le=5000)):
+    """The last few lines of a job's output, for reading in the browser."""
+    job = _cron_output_job(job_id)
+    ok, result = await asyncio.to_thread(
+        cron_collect.fetch_output, job["server"], job["log_file"],
+        # A preview only needs the tail; 2 MB is far more than `lines` of text.
+        2 * 1024 * 1024, False,
+    )
+    if not ok:
+        raise HTTPException(status_code=502, detail=result)
+
+    text = result.decode("utf-8", errors="replace")
+    tail = text.splitlines()[-lines:]
+    return {
+        "job": {k: job.get(k) for k in ("id", "name", "server", "log_file",
+                                        "log_size", "log_mtime", "partner")},
+        "lines": tail,
+        "truncated": len(text.splitlines()) > len(tail),
+        "now": time.time(),
+    }
+
+
+@app.get("/download/cron/{job_id}/output")
+async def download_cron_output(job_id: int, whole: bool = False):
+    """Download a cron job's output file.
+
+    Defaults to the recent tail. `?whole=true` asks for the entire file and is
+    refused above the cap rather than truncated - several of these are hundreds
+    of megabytes, and a CSV cut off mid-row looks like a complete file that is
+    quietly missing records.
+    """
+    job = _cron_output_job(job_id)
+    ok, result = await asyncio.to_thread(
+        cron_collect.fetch_output, job["server"], job["log_file"],
+        CRON_OUTPUT_CAP, whole,
+    )
+    if not ok:
+        raise HTTPException(status_code=502, detail=result)
+
+    base = os.path.basename(job["log_file"]) or "output"
+    name = exports.safe_filename(job["server"], base)
+    if not whole:
+        name = exports.safe_filename(job["server"], "recent", base)
+    media = "text/csv; charset=utf-8" if base.lower().endswith(".csv") \
+        else "text/plain; charset=utf-8"
+    return Response(
+        content=result,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+# --- big files: fetched in the background, downloaded when ready -----------
+
+
+async def _run_fetch(fetch_id: int, job: Dict[str, Any]) -> None:
+    """Pull one whole output file off its server. Runs as a background task."""
+    base = os.path.basename(job["log_file"]) or "output"
+    stored_name = exports.safe_filename(
+        job["server"], base, time.strftime("%Y%m%d-%H%M%S")
+    )
+    path = os.path.join(config.fetch_dir, stored_name)
+
+    ok, size = await asyncio.to_thread(
+        cron_collect.remote_size, job["server"], job["log_file"]
+    )
+    store.update_fetch(
+        fetch_id, status="running", started_at=time.time(),
+        filename=stored_name, stored_path=path,
+        total_bytes=size if ok else None,
+    )
+
+    def progress(done: int) -> None:
+        store.update_fetch(fetch_id, bytes_fetched=done)
+
+    ok, result = await asyncio.to_thread(
+        cron_collect.stream_to_disk, job["server"], job["log_file"], path,
+        progress, config.max_fetch_bytes,
+    )
+    if ok:
+        store.update_fetch(
+            fetch_id, status="done", bytes_fetched=result,
+            finished_at=time.time(), error=None,
+        )
+        # Only the newest copy of a given job's output is kept, for the same
+        # reason as the event CSVs: a pile of same-named files from different
+        # afternoons is how someone opens the wrong one.
+        _drop_old_fetches(job["id"], keep=fetch_id)
+    else:
+        if os.path.isfile(path):
+            try:
+                os.remove(path)     # a half-copied log is worse than none
+            except OSError:
+                pass
+        store.update_fetch(
+            fetch_id, status="failed", finished_at=time.time(), error=str(result),
+        )
+
+
+def _drop_old_fetches(job_id: int, keep: int) -> None:
+    for row in store.fetches(limit=200):
+        if row["job_id"] != job_id or row["id"] == keep:
+            continue
+        if row["status"] in ("queued", "running"):
+            continue
+        if row.get("stored_path") and os.path.isfile(row["stored_path"]):
+            try:
+                os.remove(row["stored_path"])
+            except OSError:
+                pass
+        store.delete_fetch(row["id"])
+
+
+@app.post("/api/cron/{job_id}/fetch")
+async def api_start_fetch(job_id: int):
+    """Start pulling this job's whole output file, however large it is."""
+    job = _cron_output_job(job_id)
+
+    running = store.active_fetch(job_id)
+    if running:
+        return {"fetch": running, "joined": True}
+
+    fetch_id = store.create_fetch(
+        job_id, job["server"], job["log_file"], total_bytes=job.get("log_size")
+    )
+    asyncio.create_task(_run_fetch(fetch_id, job))
+    return {"fetch": store.fetch_row(fetch_id), "joined": False}
+
+
+@app.get("/api/cron/{job_id}/fetch")
+async def api_fetch_status(job_id: int):
+    """The newest transfer for this job, polled while it runs."""
+    row = store.latest_fetch(job_id)
+    if row and row["status"] == "done":
+        row["available"] = bool(row.get("stored_path")
+                                and os.path.isfile(row["stored_path"]))
+    return {"fetch": row, "now": time.time()}
+
+
+@app.get("/download/cron-fetch/{fetch_id}")
+async def download_cron_fetch(fetch_id: int):
+    row = store.fetch_row(fetch_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="unknown transfer")
+    if row["status"] != "done":
+        raise HTTPException(
+            status_code=409,
+            detail=f"this transfer is {row['status']}"
+                   + (f": {row['error']}" if row.get("error") else
+                      " - it is not ready yet"),
+        )
+    path = row.get("stored_path")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(
+            status_code=410,
+            detail="the fetched copy is no longer on disk - fetch it again",
+        )
+    base = os.path.basename(row["remote_path"]) or "output"
+    media = "text/csv; charset=utf-8" if base.lower().endswith(".csv") \
+        else "text/plain; charset=utf-8"
+    return FileResponse(path, media_type=media, filename=base)
 
 
 @app.get("/api/db/identity")

@@ -221,6 +221,20 @@ class Scheduler:
                     pass
             self.store.delete_export(row["id"])
 
+        # Fetched cron output files, same window and same reasoning: they are
+        # copies of something that still exists on the server.
+        for row in self.store.fetches(limit=1000):
+            stamp = row.get("finished_at") or row.get("requested_at") or 0
+            if row.get("status") in ("queued", "running") or stamp >= cutoff:
+                continue
+            path = row.get("stored_path")
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            self.store.delete_fetch(row["id"])
+
     def _last_counts_age(self) -> Optional[float]:
         """Seconds since the newest stored count, or None if we have none."""
         try:

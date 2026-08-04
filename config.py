@@ -66,6 +66,9 @@ APP_DEFAULTS = {
     "export_dir": "exports",
     "export_keep_days": 7,
     "max_export_rows": 0,
+    # Whole cron output files pulled off the servers on request.
+    "fetch_dir": "fetched",
+    "max_fetch_mb": 2000,
     # The dashboard's own log, read per partner on the partner's Logs tab.
     "log_file": "dashboard.log",
     "log_level": "INFO",
@@ -209,6 +212,8 @@ class Config:
         self.max_upload_bytes: int = int(float(app["max_upload_mb"]) * 1024 * 1024)
         self.max_compare_rows: int = int(app["max_compare_rows"])
         self.export_dir: str = self._resolve(app["export_dir"])
+        self.fetch_dir: str = self._resolve(app["fetch_dir"])
+        self.max_fetch_bytes: int = int(float(app["max_fetch_mb"]) * 1024 * 1024)
         self.export_keep_days: int = int(app["export_keep_days"])
         self.max_export_rows: int = int(app["max_export_rows"])
         self.log_file: str = self._resolve(app["log_file"]) if app["log_file"] else ""

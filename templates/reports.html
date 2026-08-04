@@ -76,8 +76,8 @@ async function load() {
     { label: 'Open issues', value: fmtNum(r.issues.total),
       sub: `${fmtNum(r.issues.critical)} critical`,
       cls: r.issues.critical ? 'is-bad' : 'is-ok' },
-    { label: 'Missing from database', value: fmtNum(r.totals.feed_total !== null ? (r.most_missing.reduce((n, x) => n + x.value, 0)) : 0),
-      sub: `across ${r.comparison_coverage.compared} compared partners`,
+    { label: 'Not published', value: fmtNum(r.totals.db_unpublished),
+      sub: 'inserted but never went live',
       cls: 'is-bad' },
     { label: 'Sites down', value: fmtNum(r.sites.down), sub: `of ${fmtNum(r.sites.total)}`,
       cls: r.sites.down ? 'is-bad' : 'is-ok' },
@@ -93,44 +93,7 @@ async function load() {
     </div>
 
     <div class="section">
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Ingest jobs that have stopped</h2>
-          <span class="hint">largest first — these are the ones worth chasing</span>
-        </div>
-        ${r.stalled.length ? `<div class="table-scroll" style="--table-max-h:none">
-          <table>
-            <thead><tr>
-              <th class="sticky-col">Partner</th><th class="num">Live records</th>
-              <th class="num">Days since insert</th><th>Expected</th><th>Cron entry</th><th>Server</th>
-            </tr></thead>
-            <tbody>
-              ${r.stalled.map((s) => `<tr>
-                <td class="sticky-col name"><a href="/partners/${encodeURIComponent(s.name)}">${esc(s.name)}</a></td>
-                <td class="num">${fmtNum(s.live)}</td>
-                <td class="num" style="color:var(--bad);font-weight:650">${s.days !== null ? Math.round(s.days) : '—'}</td>
-                <td>${esc(s.frequency || '—')}</td>
-                <td>${cronBadge(s.cron_status)}</td>
-                <td><span class="chip">${esc(s.server || '—')}</span></td>
-              </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>` : `<div class="panel-body">${emptyState('Every ingest job is running', 'No partner is past its expected interval.')}</div>`}
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-head">
-        <h2>Spreadsheet comparison</h2>
-        <span class="hint">${r.comparison_coverage.compared} of ${r.comparison_coverage.total}
-          partners compared (${fmtPct(r.comparison_coverage.pct, 0)})</span>
-      </div>
-      <div class="split">
-        ${rankTable('Most records missing from the database',
-                    'in the partner sheet, not in ours', r.most_missing, 'Missing', 'var(--bad)')}
-        ${rankTable('Most extra records in the database',
-                    'in ours, not in the partner sheet', r.most_extra, 'Extra', 'var(--warn)')}
-      </div>
+      
     </div>
 
     <div class="section">

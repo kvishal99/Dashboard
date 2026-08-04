@@ -46,12 +46,13 @@ PARTNER_COLUMNS: List[Column] = [
 
 ISSUE_COLUMNS: List[Column] = [
     ("severity", "Status"),
-    ("process", "Process"),
-    ("title", "Error"),
+    ("subject", "Who"),
+    ("title", "What happened"),
     ("detail", "Detail"),
+    ("action", "What to do"),
+    ("process", "Process"),
     ("last_run_iso", "Last run"),
     ("scope", "Area"),
-    ("subject", "Subject"),
     ("kind", "Kind"),
     ("since_iso", "Since"),
 ]

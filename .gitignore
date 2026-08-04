@@ -19,6 +19,13 @@ uploads/
 # Generated partner event CSVs. Large (one wcities export is 120 MB), always
 # reproducible from the database, and pruned after export_keep_days.
 exports/
+<<<<<<< HEAD
 =======
 dashboard.pid
 >>>>>>> dab6eb3 (Ignore dashboard PID file)
+=======
+
+# Cron output files pulled off the servers on request. Larger still - the
+# biggest is 426 MB - and always re-fetchable from the server.
+fetched/
+>>>>>>> a065032 (Added csv downloads)
