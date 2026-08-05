@@ -137,8 +137,10 @@ async function load() {
               ? (s.alerts.recipients || []).map((r) => `<span class="chip">${esc(r)}</span>`).join(' ')
               : '<span class="muted">none</span>'],
           ])}
-          <div style="margin-top:var(--s3)">
-            <button id="test-alert" ${s.alerts.ready ? '' : 'disabled'}>Send a test alert</button>
+          <div class="sub" style="margin-top:var(--s3)">
+            Alerts are sent by the dashboard itself when a site goes down. To
+            check the setup without waiting for an outage, from a shell:
+            <span class="mono">curl -X POST .../api/alerts/test</span>
           </div>
         </div>
       </div>
@@ -183,8 +185,6 @@ async function load() {
         </div>
       </div>
     </div>`;
-
-  wireAction('test-alert', '/api/alerts/test', null, { busy: 'Sending…' });
 
   try {
     const db = await getJSON('/api/db/identity');

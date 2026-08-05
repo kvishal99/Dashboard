@@ -12,9 +12,9 @@ covering only the selected partner:
 
 | Tab | What it shows for that partner |
 |---|---|
-| **Overview** | The counts, the comparison bar if one has been run, and the details |
+| **Overview** | The counts, the job state and the details |
 | **Jobs** | Ingest freshness, then its crontab lines **grouped by what they are for** |
-| **Process Logs** | That partner's activity — collections, feed reports, comparisons, exports, cron output |
+| **Process Logs** | That partner's activity — collections, feed reports, exports, cron output |
 | **Generated Files** | Generate and download the partner's real event CSV |
 | **Issues** | Only that partner's open issues |
 
@@ -28,9 +28,9 @@ Seven sections in the sidebar:
 |---|---|
 | **Overview** | Summary only: headline tiles, who needs attention, the worst issues. Hands you to a partner |
 | **Partners** | The workspace above — the main page |
-| **Issues** | Everything currently wrong: process, error, last run, status, retry |
+| **Issues** | Everything currently wrong: who, what happened, what to do, last run |
 | **Processes** | PM2 processes, the categorised crontab inventory, and website health |
-| **Downloads** | Every file the dashboard can hand you: event CSVs, exports, logs, uploaded sheets |
+| **Downloads** | Every file the dashboard can hand you: event CSVs, exports, logs |
 | **Reports** | The management view — health split, worst offenders, printable |
 | **Settings** | What this instance is configured to do, and where to change it |
 
@@ -109,6 +109,9 @@ touching code. `%s` is bound as a parameter — the partner name is never
 formatted into the SQL string.
 
 ## Spreadsheet comparison — matching, missing and extra
+
+> **Removed from the UI.** Nothing links to this any more; the endpoints, tables
+> and the code below still work. Kept for reference in case it is wanted back.
 
 This is the one thing counts can never answer. `partner_counts` knows we hold
 2,013 rows for bokun and the sheet says 85,000, but **a gap of 82,987 is
@@ -658,9 +661,15 @@ page lists these, the partner cards count these, and the overview tiles sum
 these — so a card reading "4 issues" and the four rows you get after clicking it
 are the same four things by construction, not by careful maintenance.
 
-The page shows two groups - **Broken now** and **Worth watching** - and five
-columns: who, what happened, **what to do**, when it last ran, and a Run again
-button where re-running can actually help. Both earlier versions were hard to
+The page shows two groups - **Broken now** and **Worth watching** - and four
+columns: who, what happened, **what to do**, and when it last ran.
+
+**It is read-only.** There was a "Run again" button on each row; it re-read our
+own counts rather than re-running anyone's ingest job, so it promised an action
+it could not perform. The dashboard watches the estate, it does not operate it,
+and the fix belongs on the server named in "What to do". The test-alert button
+went from Settings for the same reason - it mailed four people from a page
+whose job is to describe configuration. Both earlier versions were hard to
 read for the same reason: they described problems in the system's own words
 ("Ingest job stalled", kind `job_stalled`, scope `partner`, value 118) and left
 the reader to work out what that meant for them. Titles are now plain

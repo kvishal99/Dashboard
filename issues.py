@@ -14,7 +14,6 @@ Each issue carries a severity, the partner or site it belongs to, a plain
 sentence saying what is wrong, and where to go about it.
 """
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
 
 # Severity drives sort order and colour. Three levels only: a fourth invites
 # arguments about whether something is "medium", and the useful question on an
@@ -30,7 +29,7 @@ def _issue(
     severity: str, kind: str, scope: str, subject: str,
     title: str, detail: str, link: Optional[str] = None,
     value: Optional[Any] = None, since: Optional[float] = None,
-    last_run: Optional[float] = None, retry: Optional[str] = None,
+    last_run: Optional[float] = None,
     process: Optional[str] = None, action: str = "",
 ) -> Dict[str, Any]:
     return {
@@ -53,11 +52,11 @@ def _issue(
         "link": link,
         "value": value,
         "since": since,
-        # When the thing that produced this issue last ran, and the endpoint
-        # that runs it again. `retry` is None wherever re-running is not a
-        # meaningful response - a button that cannot help is worse than none.
+        # When the thing that produced this issue last ran. There is no
+        # "run it again" alongside it: this dashboard reports on the estate
+        # rather than operating it, and the only honest next step is the
+        # sentence in `action`.
         "last_run": last_run,
-        "retry": retry,
         "rank": SEVERITY_RANK[severity],
     }
 
@@ -75,7 +74,6 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     # collected_at is when it last ran, and re-counting is the one action that
     # can clear a stale or failed number.
     ran = row.get("collected_at")
-    retry = f"/api/partners/{name}/refresh"
 
     # --- the counts themselves -------------------------------------------
     if row.get("ok") is False:
@@ -85,7 +83,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             row.get("error") or "The last count query against MySQL errored, so "
                                 "every number for this partner is stale.",
             link, since=row.get("collected_at"),
-            last_run=ran, retry=retry, process=f"{name} · hourly count sweep",
+            last_run=ran, process=f"{name} · hourly count sweep",
             action="Check the database connection, then re-run the count.",
         ))
     elif row.get("ok") is None:
@@ -95,7 +93,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             "No counts have been collected for this partner yet. The MySQL "
             "sweep runs on the top of every hour.",
             link,
-            last_run=ran, retry=retry, process=f"{name} · hourly count sweep",
+            last_run=ran, process=f"{name} · hourly count sweep",
             action="Nothing to do - the next hourly sweep will pick it up.",
         ))
 
@@ -118,7 +116,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                f", well past the {row.get('job_expected_days') or '?'}-day interval "
                f"its '{row.get('frequency') or 'unknown'}' schedule implies."),
             link, value=days,
-            last_run=ran, retry=retry,
+            last_run=ran,
             process=f"{name} · ingest job ({row.get('frequency') or 'no schedule'})",
             action=("Add a crontab entry on " + (row.get("server") or "its server")
                     + " - the job is not scheduled anywhere.") if removed
@@ -133,7 +131,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"'{row.get('frequency') or 'unknown'}' schedule, but still inside "
             "the grace window.",
             link, value=row.get("job_overdue_by"),
-            last_run=ran, retry=retry,
+            last_run=ran,
             process=f"{name} · ingest job ({row.get('frequency') or 'no schedule'})",
             action="Watch it - if it does not catch up by the next run, check the script.",
         ))
@@ -144,7 +142,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             "This partner has no records at all - the ingest has never "
             "successfully run.",
             link,
-            last_run=ran, retry=retry, process=f"{name} · ingest job",
+            last_run=ran, process=f"{name} · ingest job",
             action="Confirm this partner is meant to be live, then check its script.",
         ))
 
@@ -156,7 +154,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"We hold {row['feed_total']:,} records but none are published and "
             "still upcoming. The ingest is landing, but nothing is reaching the site.",
             link, value=row.get("feed_total"),
-            last_run=ran, retry=retry, process=f"{name} · publishing",
+            last_run=ran, process=f"{name} · publishing",
             action="The import works but nothing is published - check the publish step.",
         ))
     elif row.get("unpublished_pct") is not None and row["unpublished_pct"] >= 50:
@@ -166,7 +164,7 @@ def for_partner(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"{row.get('db_unpublished') or 0:,} of {row.get('feed_total') or 0:,} "
             f"records ({row['unpublished_pct']:.0f}%) inserted but never went live.",
             link, value=row.get("db_unpublished"),
-            last_run=ran, retry=retry, process=f"{name} · publishing",
+            last_run=ran, process=f"{name} · publishing",
             action="Check why these events were inserted but never published.",
         ))
 
@@ -187,7 +185,6 @@ def for_site(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                                 f"(HTTP {row.get('status_code') or 'no response'}).",
             "/processes#sites", since=row.get("checked_at"),
             last_run=row.get("checked_at"),
-            retry=f"/api/sites/refresh?url={quote(row.get('url') or '', safe='')}",
             process=f"{row['name']} · website health check",
             action="Open the site. If it loads, the check may need its expected status updating.",
         )]

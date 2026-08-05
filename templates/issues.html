@@ -16,6 +16,11 @@
   Two groups, not three severities: things that are broken now, and things to
   keep an eye on. A third bucket only ever started arguments about which one
   something belonged in.
+
+  Read-only, deliberately. There was a "Run again" button here; it re-read our
+  own counts rather than re-running anyone's ingest job, so it promised an
+  action it could not perform. This dashboard watches the estate - it does not
+  operate it, and the fix belongs on the server named in "What to do".
 #}
 <div class="tiles" id="tiles"></div>
 <div id="broken"></div>
@@ -48,12 +53,6 @@ function issueTable(target, title, hint, emptyTitle, emptyDetail) {
         render: (r) => (r.last_run
           ? `<span class="nowrap muted" title="${esc(fmtTime(r.last_run))}">${timeAgo(r.last_run)}</span>`
           : '<span class="muted">never</span>') },
-      // Only where re-running can actually help. A button that cannot fix the
-      // thing it sits beside is worse than no button.
-      { key: 'retry', label: '', sortable: false,
-        render: (r) => (r.retry
-          ? `<button class="small" data-retry="${esc(r.retry)}" data-label="${esc(r.subject)}">Run again</button>`
-          : '') },
     ],
   });
 }
@@ -81,24 +80,6 @@ function renderTiles(s, rows) {
       sub: 'worth knowing, not a fault', cls: 'is-info' },
   ]);
 }
-
-/* Delegated: both tables replace their rows on every poll. */
-document.body.addEventListener('click', async (e) => {
-  const btn = e.target.closest('[data-retry]');
-  if (!btn) return;
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'Running…';
-  try {
-    await postJSON(btn.dataset.retry);
-    toast(`Re-ran ${btn.dataset.label}`, 'ok');
-    await refresh();
-  } catch (err) {
-    toast(err.message, 'bad');
-    btn.disabled = false;
-    btn.textContent = original;
-  }
-});
 
 async function refresh() {
   const data = await getJSON('/api/issues');
